@@ -1,11 +1,8 @@
 /**
  * App.jsx — Personal super-app shell.
  *
- * Bottom navigation routes between 6 modules:
- *   Home (incl. Settings/Backup) · Timetable · Finance · Nutrition · Gym · Goals
- *
- * Stage 1: Home (with backup) and Nutrition are fully built.
- * Other tabs are stub screens until their stages.
+ * Stage 4: Home, Timetable, Nutrition, Goals, and Gym fully built.
+ * Finance remains a stub until Stage 5.
  */
 
 import { useState } from 'react'
@@ -13,6 +10,9 @@ import { T, S } from './theme.js'
 import Icon from './Icon.jsx'
 import Home from './sections/Home.jsx'
 import Nutrition from './sections/Nutrition.jsx'
+import Timetable from './sections/timetable/Timetable.jsx'
+import Goals from './sections/goals/Goals.jsx'
+import Gym from './sections/gym/Gym.jsx'
 
 const TABS = [
   { id: 'home',      label: 'Home',      icon: 'dashboard', color: T.accent    },
@@ -23,6 +23,8 @@ const TABS = [
   { id: 'goals',     label: 'Goals',     icon: 'target',    color: T.goals     },
 ]
 
+const BUILT_TABS = ['home', 'timetable', 'nutrition', 'goals', 'gym']
+
 export default function App() {
   const [tab, setTab] = useState('home')
 
@@ -30,8 +32,11 @@ export default function App() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: T.bg }}>
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         {tab === 'home'      && <Home />}
+        {tab === 'timetable' && <Timetable />}
         {tab === 'nutrition' && <Nutrition />}
-        {tab !== 'home' && tab !== 'nutrition' && <Stub tab={tab} />}
+        {tab === 'gym'       && <Gym />}
+        {tab === 'goals'     && <Goals />}
+        {!BUILT_TABS.includes(tab) && <Stub tab={tab} />}
       </div>
 
       <div style={{

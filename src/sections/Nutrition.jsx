@@ -11,7 +11,7 @@
  *   Food = { id, name, defaultGrams, calPer100g, proteinPer100g }
  */
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, ReferenceLine } from 'recharts'
 import { T, S } from '../theme.js'
 import { Modal, Toggle, ProgressBar, EmptyState, Stat, Confirm } from '../shared.jsx'
@@ -192,7 +192,10 @@ export default function Nutrition() {
         <AddItemModal slot={modal.slot} foods={foods}
           onSaveFood={addFood}
           onClose={() => setModal(null)}
-          onSave={(item) => { addItem(modal.slot, item); setModal(null) }} />
+          onSave={(item, keepOpen) => {
+            addItem(modal.slot, item)
+            if (!keepOpen) setModal(null)
+          }} />
       )}
       {modal?.type === 'editFood' && (
         <EditFoodModal food={modal.food}
@@ -586,15 +589,31 @@ function AddItemModal({ slot, foods, onSave, onSaveFood, onClose }) {
   const [selFood, setSelFood] = useState(null)
   const [libGrams, setLibGrams] = useState('')
 
-  function handleQuickSave() {
-    if (!name.trim()) return
-    const item = {
+  // "Just added: <name>" flash for chained adds — fades after 2s
+  const [flash, setFlash] = useState(null)
+  const flashTimer = useRef(null)
+  function showFlash(text) {
+    setFlash(text)
+    if (flashTimer.current) clearTimeout(flashTimer.current)
+    flashTimer.current = setTimeout(() => setFlash(null), 2000)
+  }
+
+  // Refs for focus management on chained adds
+  const nameRef = useRef(null)
+  const searchRef = useRef(null)
+
+  // Build the item payload from current quick-add state. Returns null if invalid.
+  function buildQuickItem() {
+    if (!name.trim()) return null
+    return {
       name: name.trim(),
       grams: Number(grams) || 0,
       cal: Number(cal) || 0,
       protein: Number(protein) || 0,
     }
-    onSave(item)
+  }
+
+  function maybeSaveToLibrary(item) {
     if (saveToLib && item.grams > 0) {
       onSaveFood({
         name: item.name,
@@ -605,16 +624,75 @@ function AddItemModal({ slot, foods, onSave, onSaveFood, onClose }) {
     }
   }
 
-  function handleLibrarySave() {
-    if (!selFood) return
+  function resetQuickFields() {
+    setName(''); setGrams(''); setCal(''); setProtein('')
+    // Leave saveToLib as the user left it — they likely want consistent behavior
+    // across a chain of similar items.
+  }
+
+  // Quick add — explicit button click. Saves and closes.
+  function handleQuickSaveAndClose() {
+    const item = buildQuickItem()
+    if (!item) return
+    maybeSaveToLibrary(item)
+    onSave(item, false)
+  }
+
+  // Quick add — Tab-triggered. Saves and keeps modal open for the next item.
+  function handleQuickSaveAndContinue() {
+    const item = buildQuickItem()
+    if (!item) return
+    maybeSaveToLibrary(item)
+    onSave(item, true)        // keepOpen = true
+    showFlash(`Added ${item.name}`)
+    resetQuickFields()
+    // Jump focus back to Name for the next item
+    setTimeout(() => nameRef.current?.focus(), 0)
+  }
+
+  // Library — explicit button click. Saves and closes.
+  function handleLibrarySaveAndClose() {
+    const item = buildLibraryItem()
+    if (!item) return
+    onSave(item, false)
+  }
+
+  // Library — Tab-triggered chain.
+  function handleLibrarySaveAndContinue() {
+    const item = buildLibraryItem()
+    if (!item) return
+    onSave(item, true)
+    showFlash(`Added ${item.name}`)
+    setSelFood(null); setLibGrams(''); setSearch('')
+    setTimeout(() => searchRef.current?.focus(), 0)
+  }
+
+  function buildLibraryItem() {
+    if (!selFood) return null
     const g = Number(libGrams) || selFood.defaultGrams || 100
-    const item = {
+    return {
       name: selFood.name,
       grams: g,
       cal: Math.round((selFood.calPer100g * g) / 100),
       protein: Math.round((selFood.proteinPer100g * g) / 100 * 10) / 10,
     }
-    onSave(item)
+  }
+
+  // Intercept Tab on the last field to trigger chain-save.
+  // We use onKeyDown rather than Enter because Enter on a number input
+  // can submit unwanted, and Tab is a natural "I'm done with this row" gesture.
+  function onProteinKeyDown(e) {
+    if (e.key === 'Tab' && !e.shiftKey && name.trim()) {
+      e.preventDefault()
+      handleQuickSaveAndContinue()
+    }
+  }
+
+  function onLibGramsKeyDown(e) {
+    if (e.key === 'Tab' && !e.shiftKey && selFood) {
+      e.preventDefault()
+      handleLibrarySaveAndContinue()
+    }
   }
 
   const filtered = foods.filter(f => f.name.toLowerCase().includes(search.toLowerCase()))
@@ -637,20 +715,38 @@ function AddItemModal({ slot, foods, onSave, onSaveFood, onClose }) {
         ))}
       </div>
 
+      {/* "Just added" flash — sits above the form, doesn't shift layout */}
+      {flash && (
+        <div style={{
+          background: T.good, color: '#0a0e15', padding: '8px 12px',
+          borderRadius: 8, fontSize: 12, fontWeight: 700, marginBottom: 10,
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <Icon name="check" size={14} stroke={3} /> {flash}
+        </div>
+      )}
+
       {mode === 'quick' ? (
         <>
           <label style={S.label}>Name</label>
-          <input style={S.input} value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Family Mart Chicken Rice" autoFocus />
+          <input ref={nameRef} style={S.input} value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="e.g. Family Mart Chicken Rice" autoFocus />
           <label style={S.label}>Grams</label>
-          <input type="number" inputMode="numeric" style={S.inputMono} value={grams} onChange={e => setGrams(e.target.value)} placeholder="0" />
+          <input type="number" inputMode="numeric" style={S.inputMono}
+            value={grams} onChange={e => setGrams(e.target.value)} placeholder="0" />
           <div style={{ display: 'flex', gap: 10 }}>
             <div style={{ flex: 1 }}>
               <label style={S.label}>Calories</label>
-              <input type="number" inputMode="numeric" style={S.inputMono} value={cal} onChange={e => setCal(e.target.value)} placeholder="0" />
+              <input type="number" inputMode="numeric" style={S.inputMono}
+                value={cal} onChange={e => setCal(e.target.value)} placeholder="0" />
             </div>
             <div style={{ flex: 1 }}>
               <label style={S.label}>Protein (g)</label>
-              <input type="number" inputMode="decimal" style={S.inputMono} value={protein} onChange={e => setProtein(e.target.value)} placeholder="0" />
+              <input type="number" inputMode="decimal" style={S.inputMono}
+                value={protein} onChange={e => setProtein(e.target.value)}
+                onKeyDown={onProteinKeyDown}
+                placeholder="0" />
             </div>
           </div>
           {grams && cal && (
@@ -662,16 +758,28 @@ function AddItemModal({ slot, foods, onSave, onSaveFood, onClose }) {
               <Toggle on={saveToLib} onChange={setSaveToLib} color={T.nutrition} />
             </div>
           )}
-          <button onClick={handleQuickSave} disabled={!name.trim()}
+          <div style={{
+            fontSize: 11, color: T.text3, marginTop: 14, lineHeight: 1.4,
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <kbd style={{
+              background: T.bg3, border: `1px solid ${T.border}`, borderRadius: 4,
+              padding: '1px 6px', fontFamily: "'DM Mono', monospace", fontSize: 10,
+              color: T.text2,
+            }}>Tab</kbd>
+            <span>from Protein to add &amp; keep adding more items</span>
+          </div>
+          <button onClick={handleQuickSaveAndClose} disabled={!name.trim()}
             style={{
-              ...S.btnPrimary, marginTop: 18, background: T.nutrition, color: '#1a1208',
+              ...S.btnPrimary, marginTop: 10, background: T.nutrition, color: '#1a1208',
               opacity: name.trim() ? 1 : 0.5,
-            }}>Add to {slotLabel}</button>
+            }}>Add &amp; close</button>
         </>
       ) : (
         <>
-          <input style={S.input} value={search} onChange={e => setSearch(e.target.value)} placeholder="Search library..." />
-          <div style={{ marginTop: 12, maxHeight: 300, overflowY: 'auto' }}>
+          <input ref={searchRef} style={S.input} value={search}
+            onChange={e => setSearch(e.target.value)} placeholder="Search library..." />
+          <div style={{ marginTop: 12, maxHeight: 260, overflowY: 'auto' }}>
             {foods.length === 0 ? (
               <EmptyState icon="fork" title="No foods saved" hint="Use Quick add to log a food, then save it to your library" />
             ) : filtered.map(f => (
@@ -696,7 +804,9 @@ function AddItemModal({ slot, foods, onSave, onSaveFood, onClose }) {
             <>
               <label style={S.label}>Grams</label>
               <input type="number" inputMode="numeric" style={S.inputMono}
-                value={libGrams} onChange={e => setLibGrams(e.target.value)} autoFocus />
+                value={libGrams} onChange={e => setLibGrams(e.target.value)}
+                onKeyDown={onLibGramsKeyDown}
+                autoFocus />
               <div style={{
                 marginTop: 10, padding: '10px 12px', background: T.bg3, borderRadius: 10,
                 display: 'flex', justifyContent: 'space-between',
@@ -706,9 +816,20 @@ function AddItemModal({ slot, foods, onSave, onSaveFood, onClose }) {
                   {Math.round((selFood.calPer100g * (Number(libGrams) || 0)) / 100)} kcal · {Math.round((selFood.proteinPer100g * (Number(libGrams) || 0)) / 100 * 10) / 10}g
                 </div>
               </div>
-              <button onClick={handleLibrarySave}
-                style={{ ...S.btnPrimary, marginTop: 18, background: T.nutrition, color: '#1a1208' }}>
-                Add to {slotLabel}
+              <div style={{
+                fontSize: 11, color: T.text3, marginTop: 14, lineHeight: 1.4,
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <kbd style={{
+                  background: T.bg3, border: `1px solid ${T.border}`, borderRadius: 4,
+                  padding: '1px 6px', fontFamily: "'DM Mono', monospace", fontSize: 10,
+                  color: T.text2,
+                }}>Tab</kbd>
+                <span>from Grams to add &amp; keep adding more items</span>
+              </div>
+              <button onClick={handleLibrarySaveAndClose}
+                style={{ ...S.btnPrimary, marginTop: 10, background: T.nutrition, color: '#1a1208' }}>
+                Add &amp; close
               </button>
             </>
           )}

@@ -98,6 +98,7 @@ export const KEYS = {
   TT_ACC: 'personal.timetable.acc',
   TT_ONBOARDED: 'personal.timetable.onboarded',
   TT_SOUND: 'personal.timetable.sound',
+  TT_NOTIFY_ON: 'personal.timetable.notify_on',
   // Finance
   FIN_DATA: 'personal.finance.data',
   // Nutrition
@@ -110,10 +111,9 @@ export const KEYS = {
   GYM_EXERCISES: 'personal.gym.exercises', // exercise library
   GYM_SPORTS: 'personal.gym.sports', // sport library
   // Goals
-  GOALS_DAILY: 'personal.goals.daily',
-  GOALS_WEEKLY: 'personal.goals.weekly',
-  GOALS_MONTHLY: 'personal.goals.monthly',
-  // Badges
+  GOALS_ACTIVE:   'personal.goals.active',
+  GOALS_ARCHIVE:  'personal.goals.archive',
+  // Badges (Stage 4+)
   BADGES: 'personal.badges',
   // Global
   SETTINGS: 'personal.settings',

@@ -45,15 +45,18 @@ export async function buildBackup() {
 /**
  * Trigger a download of the backup as a JSON file.
  * Filename includes the date so multiple exports don't collide.
+ * Optional `tag` is appended to the filename to distinguish automatic
+ * backups (e.g. 'pre-restore') from user-initiated ones.
  */
-export async function exportBackup() {
+export async function exportBackup(tag = null) {
   const backup = await buildBackup()
   const json = JSON.stringify(backup, null, 2)
   const blob = new Blob([json], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
 
   const date = new Date().toISOString().split('T')[0]
-  const filename = `personal-backup-${date}.json`
+  const suffix = tag ? `-${tag}` : ''
+  const filename = `personal-backup-${date}${suffix}.json`
 
   const a = document.createElement('a')
   a.href = url

@@ -1,14 +1,22 @@
 /**
- * Home.jsx — Currently a placeholder home screen with the global settings
- * accessible (backup/restore + storage stats). The proper dashboard with
- * cross-module summaries lands in a later stage.
+ * Home.jsx — Dashboard view + global settings.
+ *
+ * Dashboard pulls today's events from Timetable and active goals from Goals,
+ * presenting a cross-module daily snapshot. Settings holds the backup/restore.
+ *
+ * Loads data on every visibility change so it stays fresh after editing
+ * in other tabs.
  */
 
 import { useState, useEffect } from 'react'
 import { T, S } from '../theme.js'
-import { Confirm } from '../shared.jsx'
+import { Confirm, ProgressBar } from '../shared.jsx'
 import Icon from '../Icon.jsx'
 import { exportBackup, pickBackupFile, validateBackup, restoreBackup, getStorageStats } from '../backup.js'
+import { loadJSON, KEYS } from '../storage.js'
+import { fmtTime, timeToMin, getTodayDayName, fmtDateLong } from '../utils.js'
+import { CATEGORY_BY_ID } from './timetable/data.js'
+import { TIERS } from './goals/data.js'
 
 export default function Home() {
   const [view, setView] = useState('home') // 'home' | 'settings'
@@ -16,7 +24,7 @@ export default function Home() {
   return (
     <div style={S.screen}>
       <div style={S.header}>
-        <div style={S.headerTitle}>{view === 'home' ? 'Personal' : 'Settings'}</div>
+        <div style={S.headerTitle}>{view === 'home' ? 'Today' : 'Settings'}</div>
         {view === 'home' && (
           <button style={S.iconBtn} onClick={() => setView('settings')}>
             <Icon name="settings" size={20} />
@@ -35,48 +43,261 @@ export default function Home() {
   )
 }
 
-// ── Home placeholder ────────────────────────────────────────────────────────
+// ── Dashboard ───────────────────────────────────────────────────────────────
 
 function HomeView() {
-  const today = new Date().toLocaleDateString('en', {
-    weekday: 'long', month: 'long', day: 'numeric',
-  })
+  const [events, setEvents] = useState([])
+  const [tempEvents, setTempEvents] = useState([])
+  const [goals, setGoals] = useState([])
+  const [gymSessions, setGymSessions] = useState([])
+  const [loaded, setLoaded] = useState(false)
+
+  async function refresh() {
+    const [ev, te, gl, gs] = await Promise.all([
+      loadJSON(KEYS.TT_EVENTS, []),
+      loadJSON(KEYS.TT_TEMP, []),
+      loadJSON(KEYS.GOALS_ACTIVE, []),
+      loadJSON(KEYS.GYM_SESSIONS, []),
+    ])
+    setEvents(ev)
+    setTempEvents(te)
+    setGoals(gl)
+    setGymSessions(gs)
+    setLoaded(true)
+  }
+
+  useEffect(() => {
+    refresh()
+    function onVis() { if (document.visibilityState === 'visible') refresh() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
+
+  if (!loaded) return null
+
+  const today = getTodayDayName()
+  const todayStr = fmtDateLong(new Date().toISOString().split('T')[0])
+
+  const todayEvents = events.filter(e => e.day === today)
+  const todayTempEvents = tempEvents.filter(e => e.day === today)
+  const allTodayEvents = [...todayEvents, ...todayTempEvents]
+    .sort((a, b) => timeToMin(a.start) - timeToMin(b.start))
+
+  const nowMin = new Date().getHours() * 60 + new Date().getMinutes()
+  const upcomingEvents = allTodayEvents.filter(e => timeToMin(e.end) > nowMin)
+  const nextEvent = upcomingEvents[0]
+
+  const goalsByTier = { daily: [], weekly: [], monthly: [] }
+  for (const g of goals) goalsByTier[g.tier]?.push(g)
+
+  // Gym week stats — sessions in the last 7 days
+  const weekAgo = new Date()
+  weekAgo.setDate(weekAgo.getDate() - 7)
+  const weekAgoStr = weekAgo.toISOString().split('T')[0]
+  const weekSessions = gymSessions.filter(s => s.date >= weekAgoStr)
+  const workoutCount = weekSessions.filter(s => s.kind === 'workout').length
+  const sportCount = weekSessions.filter(s => s.kind === 'sport').length
+  const todaySessions = gymSessions.filter(s => s.date === new Date().toISOString().split('T')[0])
 
   return (
     <div style={S.scroll}>
-      <div style={{ fontSize: 13, color: T.text3, marginBottom: 4 }}>{today}</div>
-      <div style={{ fontSize: 24, fontWeight: 800, color: T.text, marginBottom: 24 }}>
-        Welcome back
-      </div>
+      <div style={{ fontSize: 13, color: T.text3, marginBottom: 2 }}>{todayStr}</div>
 
+      {/* Hero card — next event or status */}
       <div style={{
         background: T.bg2, border: `1px solid ${T.border}`, borderRadius: 14,
-        padding: 18, marginBottom: 12,
+        padding: 16, marginTop: 8, marginBottom: 14,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-          <div style={{ color: T.accent }}><Icon name="dashboard" size={20} /></div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>Dashboard coming soon</div>
-        </div>
-        <div style={{ fontSize: 13, color: T.text2, lineHeight: 1.5 }}>
-          Once Gym, Goals, and the other modules are built, this screen will show your
-          daily snapshot — calories vs target, today's timetable, gym sessions this week,
-          open goals, and budget health.
-        </div>
+        {nextEvent ? (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>
+              {nowMin >= timeToMin(nextEvent.start) ? 'Now' : 'Up next'}
+            </div>
+            <div style={{ fontSize: 19, fontWeight: 700, color: T.text }}>
+              {nextEvent.title}
+            </div>
+            <div className="mono" style={{ fontSize: 12, color: T.text2, marginTop: 4 }}>
+              {fmtTime(nextEvent.start)} – {fmtTime(nextEvent.end)}
+              {nextEvent.category && CATEGORY_BY_ID[nextEvent.category] && (
+                <span style={{ color: CATEGORY_BY_ID[nextEvent.category].color, marginLeft: 8 }}>
+                  · {CATEGORY_BY_ID[nextEvent.category].label}
+                </span>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>
+              {allTodayEvents.length === 0 ? 'Today' : 'Day complete'}
+            </div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: T.text }}>
+              {allTodayEvents.length === 0 ? 'No events scheduled' : 'Nothing left on the schedule'}
+            </div>
+          </>
+        )}
       </div>
 
-      <div style={{
-        background: T.bg2, border: `1px solid ${T.border}`, borderRadius: 14,
-        padding: 18,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-          <div style={{ color: T.nutrition }}><Icon name="fork" size={20} /></div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>Nutrition is live</div>
+      {/* Today's timetable */}
+      <SectionTitle icon="calendar" label="Schedule" color={T.timetable}
+        right={`${allTodayEvents.length} ${allTodayEvents.length === 1 ? 'event' : 'events'}`} />
+      {allTodayEvents.length === 0 ? (
+        <div style={{
+          background: T.bg2, border: `1px solid ${T.border}`, borderRadius: 12,
+          padding: 14, fontSize: 13, color: T.text3, textAlign: 'center',
+        }}>
+          No events scheduled for {today}.
         </div>
-        <div style={{ fontSize: 13, color: T.text2, lineHeight: 1.5 }}>
-          Tap the Nutrition tab below to log meals, track body weight, and see trends.
-          Your data is saved on this device only.
+      ) : (
+        <div style={{ marginBottom: 6 }}>
+          {allTodayEvents.slice(0, 6).map(ev => {
+            const past = timeToMin(ev.end) <= nowMin
+            const live = !past && timeToMin(ev.start) <= nowMin
+            const color = ev.color || CATEGORY_BY_ID[ev.category]?.color || T.text2
+            const linked = goals.filter(g => {
+              if (!g.linkedEventId) return false
+              if (ev.isTemp) return g.linkedEventId === ev.id
+              return g.linkedEventGroupId === ev.groupId
+            })
+            return (
+              <div key={ev.id} style={{
+                background: T.bg2, border: `1px solid ${live ? color : T.border}`,
+                borderLeft: `3px solid ${color}`,
+                borderRadius: 10, padding: '10px 12px', marginBottom: 6,
+                opacity: past ? 0.45 : 1,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{ev.title}</div>
+                    <div className="mono" style={{ fontSize: 11, color: T.text3, marginTop: 2 }}>
+                      {fmtTime(ev.start)} – {fmtTime(ev.end)}
+                    </div>
+                  </div>
+                  {live && (
+                    <div style={{
+                      background: color, color: '#0a0e15', fontSize: 9, fontWeight: 800,
+                      padding: '2px 6px', borderRadius: 4, letterSpacing: '.04em',
+                    }}>LIVE</div>
+                  )}
+                  {linked.length > 0 && (
+                    <div title={`${linked.length} linked goal${linked.length > 1 ? 's' : ''}`}
+                      style={{
+                        background: T.goals, color: '#0a0e15', fontSize: 10, fontWeight: 800,
+                        padding: '2px 6px', borderRadius: 4,
+                      }}>
+                      {linked.length}🎯
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+          {allTodayEvents.length > 6 && (
+            <div style={{ fontSize: 12, color: T.text3, textAlign: 'center', padding: 4 }}>
+              +{allTodayEvents.length - 6} more
+            </div>
+          )}
         </div>
+      )}
+
+      {/* Active goals */}
+      <SectionTitle icon="target" label="Goals" color={T.goals}
+        right={`${goals.length} active`} />
+      {goals.length === 0 ? (
+        <div style={{
+          background: T.bg2, border: `1px solid ${T.border}`, borderRadius: 12,
+          padding: 14, fontSize: 13, color: T.text3, textAlign: 'center',
+        }}>
+          No active goals. Tap the Goals tab to add some.
+        </div>
+      ) : (
+        <div>
+          {TIERS.map(tier => {
+            const tg = goalsByTier[tier.id]
+            if (!tg.length) return null
+            const done = tg.filter(g =>
+              g.kind === 'check' ? g.checkedAt : (g.progress || 0) >= g.target
+            ).length
+            const pct = Math.round((done / tg.length) * 100)
+
+            return (
+              <div key={tier.id} style={{
+                background: T.bg2, border: `1px solid ${T.border}`, borderRadius: 12,
+                padding: 12, marginBottom: 8,
+              }}>
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  marginBottom: 8,
+                }}>
+                  <div style={{
+                    fontSize: 12, fontWeight: 800, color: tier.color,
+                    textTransform: 'uppercase', letterSpacing: '.06em',
+                  }}>{tier.label}</div>
+                  <div className="mono" style={{ fontSize: 12, color: T.text3 }}>
+                    {done}/{tg.length}
+                  </div>
+                </div>
+                <ProgressBar value={done} max={tg.length} color={tier.color} height={5} bg={T.bg3} />
+                {pct === 100 && (
+                  <div style={{ fontSize: 11, color: T.good, marginTop: 6, fontWeight: 600 }}>
+                    ✓ All {tier.id} goals complete
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Gym & sport — this week */}
+      <SectionTitle icon="dumbbell" label="Training" color={T.gym}
+        right={`last 7 days`} />
+      {weekSessions.length === 0 ? (
+        <div style={{
+          background: T.bg2, border: `1px solid ${T.border}`, borderRadius: 12,
+          padding: 14, fontSize: 13, color: T.text3, textAlign: 'center',
+        }}>
+          No sessions logged in the last week.
+        </div>
+      ) : (
+        <div style={{
+          background: T.bg2, border: `1px solid ${T.border}`, borderRadius: 12,
+          padding: 14,
+        }}>
+          <div style={{ display: 'flex', gap: 16, marginBottom: todaySessions.length > 0 ? 10 : 0 }}>
+            <div>
+              <div className="mono" style={{ fontSize: 22, fontWeight: 600, color: T.text }}>{workoutCount}</div>
+              <div style={{ fontSize: 11, color: T.text3 }}>workouts</div>
+            </div>
+            <div>
+              <div className="mono" style={{ fontSize: 22, fontWeight: 600, color: T.text }}>{sportCount}</div>
+              <div style={{ fontSize: 11, color: T.text3 }}>sport sessions</div>
+            </div>
+          </div>
+          {todaySessions.length > 0 && (
+            <div style={{
+              fontSize: 11, color: T.good, fontWeight: 600, marginTop: 8,
+              paddingTop: 8, borderTop: `1px solid ${T.border}`,
+            }}>
+              ✓ Logged {todaySessions.length} session{todaySessions.length > 1 ? 's' : ''} today
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SectionTitle({ icon, label, color, right }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '6px 4px 8px', marginTop: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ color }}><Icon name={icon} size={16} /></div>
+        <div style={{ fontSize: 12, fontWeight: 800, color: T.text2, textTransform: 'uppercase', letterSpacing: '.05em' }}>{label}</div>
       </div>
+      {right && <div style={{ fontSize: 11, color: T.text3 }}>{right}</div>}
     </div>
   )
 }
@@ -86,8 +307,8 @@ function HomeView() {
 function SettingsView() {
   const [stats, setStats] = useState(null)
   const [busy, setBusy] = useState(false)
-  const [message, setMessage] = useState(null) // { type: 'success'|'error', text }
-  const [pendingRestore, setPendingRestore] = useState(null) // backup data awaiting confirm
+  const [message, setMessage] = useState(null)
+  const [pendingRestore, setPendingRestore] = useState(null)
 
   useEffect(() => { refreshStats() }, [])
 
@@ -107,9 +328,7 @@ function SettingsView() {
       flash('success', `Saved ${result.filename} (${formatBytes(result.size)})`)
     } catch (err) {
       flash('error', `Export failed: ${err.message}`)
-    } finally {
-      setBusy(false)
-    }
+    } finally { setBusy(false) }
   }
 
   async function handleImport() {
@@ -118,28 +337,25 @@ function SettingsView() {
       const parsed = await pickBackupFile()
       if (!parsed) { setBusy(false); return }
       const v = validateBackup(parsed)
-      if (!v.valid) {
-        flash('error', `Invalid backup: ${v.reason}`)
-        setBusy(false)
-        return
-      }
-      // Stash it, ask for confirmation before overwriting
+      if (!v.valid) { flash('error', `Invalid backup: ${v.reason}`); setBusy(false); return }
       setPendingRestore({ data: v.data, exportedAt: v.exportedAt })
     } catch (err) {
       flash('error', `Import failed: ${err.message}`)
-    } finally {
-      setBusy(false)
-    }
+    } finally { setBusy(false) }
   }
 
   async function confirmRestore() {
     setBusy(true)
     try {
+      try { await exportBackup('pre-restore') }
+      catch (err) {
+        flash('error', `Pre-restore safety backup failed (${err.message}). Restore cancelled.`)
+        setPendingRestore(null); setBusy(false); return
+      }
       await restoreBackup(pendingRestore.data)
-      flash('success', 'Backup restored — restarting…')
+      flash('success', 'Restored. Pre-restore backup saved to Downloads.')
       setPendingRestore(null)
-      // Reload after a beat so every module re-mounts and reads fresh state
-      setTimeout(() => location.reload(), 1200)
+      setTimeout(() => location.reload(), 1500)
     } catch (err) {
       flash('error', `Restore failed: ${err.message}`)
       setPendingRestore(null)
@@ -149,11 +365,8 @@ function SettingsView() {
 
   return (
     <div style={S.scroll}>
-      {/* Storage summary */}
       <div style={{ ...S.card }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>
-          Storage
-        </div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 8 }}>Storage</div>
         {stats ? (
           <div style={{ display: 'flex', gap: 16 }}>
             <div>
@@ -170,10 +383,7 @@ function SettingsView() {
         )}
       </div>
 
-      {/* Backup section */}
-      <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>
-        Backup
-      </div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>Backup</div>
 
       <div style={{ ...S.card }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 12 }}>
@@ -188,11 +398,8 @@ function SettingsView() {
         <button onClick={handleExport} disabled={busy} style={{
           width: '100%', background: T.accent, border: 'none', borderRadius: 10,
           padding: 12, color: '#031018', fontSize: 14, fontWeight: 700,
-          cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit',
-          opacity: busy ? 0.6 : 1,
-        }}>
-          {busy ? 'Working…' : 'Export backup'}
-        </button>
+          cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
+        }}>{busy ? 'Working…' : 'Export backup'}</button>
       </div>
 
       <div style={{ ...S.card }}>
@@ -201,33 +408,23 @@ function SettingsView() {
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Restore from backup</div>
             <div style={{ fontSize: 12, color: T.text3, marginTop: 2, lineHeight: 1.4 }}>
-              Replaces all current data with the contents of a backup file. You'll be asked to confirm.
+              Replaces all current data with the contents of a backup file. A safety backup will be saved automatically before restoring.
             </div>
           </div>
         </div>
         <button onClick={handleImport} disabled={busy} style={{
           width: '100%', background: 'transparent', border: `1px solid ${T.warn}`,
           borderRadius: 10, padding: 12, color: T.warn, fontSize: 14, fontWeight: 700,
-          cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit',
-          opacity: busy ? 0.6 : 1,
-        }}>
-          {busy ? 'Working…' : 'Import backup'}
-        </button>
+          cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
+        }}>{busy ? 'Working…' : 'Import backup'}</button>
       </div>
 
-      {/* About */}
-      <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>
-        About
-      </div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>About</div>
       <div style={{ ...S.card, fontSize: 12, color: T.text2, lineHeight: 1.6 }}>
-        <div>Personal v0.1 (Stage 1)</div>
+        <div>Personal v0.4 (Stage 4 — Gym)</div>
         <div style={{ marginTop: 4 }}>All data stored locally on this device.</div>
-        <div style={{ marginTop: 4 }}>
-          On Android the database is AES-256 encrypted with a device-specific key.
-        </div>
       </div>
 
-      {/* Toast-style flash message */}
       {message && (
         <div style={{
           position: 'fixed', bottom: 90, left: 16, right: 16,
@@ -235,17 +432,15 @@ function SettingsView() {
           color: '#0a0e15', padding: '12px 16px', borderRadius: 10,
           fontSize: 13, fontWeight: 600, textAlign: 'center', zIndex: 100,
           boxShadow: '0 4px 16px rgba(0,0,0,.3)',
-        }}>
-          {message.text}
-        </div>
+        }}>{message.text}</div>
       )}
 
-      {/* Restore confirmation */}
       {pendingRestore && (
         <Confirm
           title="Restore from backup?"
           message={
-            `This will replace ALL current data with the backup contents.` +
+            `This will replace ALL current data with the backup contents. ` +
+            `A pre-restore safety backup will be saved to Downloads automatically.` +
             (pendingRestore.exportedAt
               ? `\n\nBackup exported: ${new Date(pendingRestore.exportedAt).toLocaleString()}`
               : '')
@@ -258,8 +453,6 @@ function SettingsView() {
     </div>
   )
 }
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatBytes(n) {
   if (n < 1024) return `${n} B`
