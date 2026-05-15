@@ -13,6 +13,11 @@ import { T, S } from '../theme.js'
 import { Confirm, ProgressBar } from '../shared.jsx'
 import Icon from '../Icon.jsx'
 import { exportBackup, pickBackupFile, validateBackup, restoreBackup, getStorageStats } from '../backup.js'
+import {
+  checkAndRun, getFrequency, setFrequency, getLastAutoBackup,
+  pickBackupDirectory, clearBackupDirectory, getBackupDirectoryLabel,
+  writeBackupToDestination, fsApiSupported, FREQUENCIES,
+} from '../autoBackup.js'
 import { loadJSON, KEYS } from '../storage.js'
 import { fmtTime, timeToMin, getTodayDayName, fmtDateLong } from '../utils.js'
 import { CATEGORY_BY_ID } from './timetable/data.js'
@@ -20,6 +25,21 @@ import { TIERS } from './goals/data.js'
 
 export default function Home() {
   const [view, setView] = useState('home') // 'home' | 'settings'
+  const [autoBackupToast, setAutoBackupToast] = useState(null)
+
+  // Check auto-backup on first mount (once per app session).
+  // Module-level guard prevents firing twice if Home unmounts/remounts.
+  useEffect(() => {
+    if (window.__autoBackupChecked) return
+    window.__autoBackupChecked = true
+    ;(async () => {
+      const r = await checkAndRun()
+      if (r.ran) {
+        setAutoBackupToast(`Auto-backup saved (${formatBytes(r.result.size)})`)
+        setTimeout(() => setAutoBackupToast(null), 3500)
+      }
+    })()
+  }, [])
 
   return (
     <div style={S.screen}>
@@ -39,6 +59,16 @@ export default function Home() {
 
       {view === 'home' && <HomeView />}
       {view === 'settings' && <SettingsView />}
+
+      {autoBackupToast && (
+        <div style={{
+          position: 'fixed', bottom: 90, left: 16, right: 16,
+          background: T.good, color: '#0a0e15',
+          padding: '12px 16px', borderRadius: 10,
+          fontSize: 13, fontWeight: 600, textAlign: 'center', zIndex: 200,
+          boxShadow: '0 4px 16px rgba(0,0,0,.3)',
+        }}>{autoBackupToast}</div>
+      )}
     </div>
   )
 }
@@ -310,10 +340,45 @@ function SettingsView() {
   const [message, setMessage] = useState(null)
   const [pendingRestore, setPendingRestore] = useState(null)
 
-  useEffect(() => { refreshStats() }, [])
+  // Auto-backup settings state
+  const [frequency, setFreqState] = useState('weekly')
+  const [lastAuto, setLastAuto] = useState(null)
+  const [dirLabel, setDirLabel] = useState(null)
+  const fsSupported = fsApiSupported()
+
+  useEffect(() => { refreshStats(); refreshBackupSettings() }, [])
 
   async function refreshStats() {
     setStats(await getStorageStats())
+  }
+
+  async function refreshBackupSettings() {
+    setFreqState(await getFrequency())
+    setLastAuto(await getLastAutoBackup())
+    setDirLabel(await getBackupDirectoryLabel())
+  }
+
+  async function handleFrequencyChange(f) {
+    await setFrequency(f)
+    setFreqState(f)
+  }
+
+  async function handlePickDir() {
+    try {
+      const r = await pickBackupDirectory()
+      if (r) {
+        setDirLabel(r.label)
+        flash('success', `Backups will save to "${r.label}"`)
+      }
+    } catch (err) {
+      flash('error', `Folder picker failed: ${err.message}`)
+    }
+  }
+
+  async function handleClearDir() {
+    await clearBackupDirectory()
+    setDirLabel(null)
+    flash('success', 'Reverted to Downloads folder')
   }
 
   function flash(type, text) {
@@ -324,8 +389,11 @@ function SettingsView() {
   async function handleExport() {
     setBusy(true)
     try {
-      const result = await exportBackup()
-      flash('success', `Saved ${result.filename} (${formatBytes(result.size)})`)
+      const result = await writeBackupToDestination()
+      const where = result.location === 'directory'
+        ? 'chosen folder'
+        : 'Downloads'
+      flash('success', `Saved ${result.filename} to ${where} (${formatBytes(result.size)})`)
     } catch (err) {
       flash('error', `Export failed: ${err.message}`)
     } finally { setBusy(false) }
@@ -347,13 +415,13 @@ function SettingsView() {
   async function confirmRestore() {
     setBusy(true)
     try {
-      try { await exportBackup('pre-restore') }
+      try { await writeBackupToDestination('pre-restore') }
       catch (err) {
         flash('error', `Pre-restore safety backup failed (${err.message}). Restore cancelled.`)
         setPendingRestore(null); setBusy(false); return
       }
       await restoreBackup(pendingRestore.data)
-      flash('success', 'Restored. Pre-restore backup saved to Downloads.')
+      flash('success', 'Restored. Pre-restore backup saved.')
       setPendingRestore(null)
       setTimeout(() => location.reload(), 1500)
     } catch (err) {
@@ -385,13 +453,51 @@ function SettingsView() {
 
       <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>Backup</div>
 
+      {/* Destination card */}
+      <div style={{ ...S.card }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
+          <div style={{ color: T.accent, marginTop: 2 }}><Icon name="dashboard" size={18} /></div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Backup destination</div>
+            <div style={{ fontSize: 12, color: T.text3, marginTop: 2, lineHeight: 1.4 }}>
+              {dirLabel
+                ? <>Saving to <span className="mono">📁 {dirLabel}</span></>
+                : 'Saving to your Downloads folder'}
+            </div>
+          </div>
+        </div>
+        {fsSupported ? (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={handlePickDir} style={{
+              flex: 1, background: 'transparent', border: `1px solid ${T.border}`,
+              borderRadius: 10, padding: 10, color: T.text, fontSize: 13, fontWeight: 600,
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}>{dirLabel ? 'Change folder' : 'Choose folder'}</button>
+            {dirLabel && (
+              <button onClick={handleClearDir} style={{
+                background: 'transparent', border: `1px solid ${T.border}`,
+                borderRadius: 10, padding: '10px 14px', color: T.text3, fontSize: 13, fontWeight: 600,
+                cursor: 'pointer', fontFamily: 'inherit',
+              }}>Reset</button>
+            )}
+          </div>
+        ) : (
+          <div style={{
+            fontSize: 11, color: T.text4, padding: '8px 10px',
+            background: T.bg3, borderRadius: 8, lineHeight: 1.4,
+          }}>
+            Custom folder requires Chrome or Edge. On this browser, backups always go to Downloads.
+          </div>
+        )}
+      </div>
+
       <div style={{ ...S.card }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 12 }}>
           <div style={{ color: T.accent, marginTop: 2 }}><Icon name="chart" size={18} /></div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Export everything</div>
             <div style={{ fontSize: 12, color: T.text3, marginTop: 2, lineHeight: 1.4 }}>
-              Saves a JSON file with all modules' data. Goes to Downloads on this device.
+              Manually saves a JSON file with all modules' data to the destination above.
             </div>
           </div>
         </div>
@@ -399,7 +505,41 @@ function SettingsView() {
           width: '100%', background: T.accent, border: 'none', borderRadius: 10,
           padding: 12, color: '#031018', fontSize: 14, fontWeight: 700,
           cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
-        }}>{busy ? 'Working…' : 'Export backup'}</button>
+        }}>{busy ? 'Working…' : 'Export backup now'}</button>
+      </div>
+
+      {/* Auto-backup card */}
+      <div style={{ ...S.card }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
+          <div style={{ color: T.good, marginTop: 2 }}><Icon name="history" size={18} /></div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>Automatic backups</div>
+            <div style={{ fontSize: 12, color: T.text3, marginTop: 2, lineHeight: 1.4 }}>
+              Run on app open if due. Versioned filenames so older backups are preserved.
+            </div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
+          {FREQUENCIES.map(f => (
+            <button key={f.id} onClick={() => handleFrequencyChange(f.id)} style={{
+              flex: 1,
+              background: frequency === f.id ? T.good : 'transparent',
+              color: frequency === f.id ? '#0a0e15' : T.text2,
+              border: `1px solid ${frequency === f.id ? T.good : T.border}`,
+              borderRadius: 8, padding: '8px 4px', fontSize: 12, fontWeight: 700,
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}>{f.label}</button>
+          ))}
+        </div>
+        <div style={{
+          fontSize: 11, color: T.text3, padding: '6px 2px 0',
+        }}>
+          {frequency === 'off'
+            ? 'Auto-backups disabled.'
+            : lastAuto
+              ? <>Last auto-backup: <span className="mono">{relativeTime(lastAuto)}</span></>
+              : 'No auto-backups yet — next one runs on next app open.'}
+        </div>
       </div>
 
       <div style={{ ...S.card }}>
@@ -421,7 +561,7 @@ function SettingsView() {
 
       <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>About</div>
       <div style={{ ...S.card, fontSize: 12, color: T.text2, lineHeight: 1.6 }}>
-        <div>Personal v0.4 (Stage 4 — Gym)</div>
+        <div>Personal v0.4.1 — Auto-backup</div>
         <div style={{ marginTop: 4 }}>All data stored locally on this device.</div>
       </div>
 
@@ -458,4 +598,16 @@ function formatBytes(n) {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`
   return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
+function relativeTime(date) {
+  const ms = Date.now() - date.getTime()
+  const mins = Math.round(ms / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`
+  const days = Math.round(hours / 24)
+  if (days < 30) return `${days} day${days === 1 ? '' : 's'} ago`
+  return date.toLocaleDateString()
 }

@@ -68,7 +68,7 @@ export async function exportBackup(tag = null) {
   // Free the blob URL after the click finishes
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 
-  return { filename, size: blob.size, keys: Object.keys(backup.data).length }
+  return { filename, size: blob.size, keys: Object.keys(backup.data).length, location: 'download' }
 }
 
 // ── Import ──────────────────────────────────────────────────────────────────
