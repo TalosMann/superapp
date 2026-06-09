@@ -121,14 +121,39 @@ export function validateBackup(obj) {
  * not a merge.
  */
 export async function restoreBackup(backupData) {
-  // Wipe known keys first (data not in the backup should be cleared)
+  console.log('[restore] START — keys in backup:', Object.keys(backupData).length)
+
+  // Wipe known keys first
+  console.log('[restore] wiping', ALL_KEYS.length, 'known keys...')
   for (const key of ALL_KEYS) {
-    await Storage.remove(key)
+    try {
+      await Storage.remove(key)
+    } catch (e) {
+      console.error('[restore] FAILED to remove', key, e)
+      throw e
+    }
   }
-  // Write each backup entry. JSON-stringify objects, leave strings alone.
+  console.log('[restore] wipe complete')
+
+  // Write each backup entry
+  let written = 0
   for (const [key, value] of Object.entries(backupData)) {
     const raw = typeof value === 'string' ? value : JSON.stringify(value)
-    await Storage.set(key, raw)
+    console.log('[restore] writing', key, '(' + raw.length + ' chars)')
+    try {
+      await Storage.set(key, raw)
+      written++
+    } catch (e) {
+      console.error('[restore] FAILED to write', key, e)
+      throw e
+    }
+  }
+  console.log('[restore] DONE — wrote', written, 'keys')
+
+  // Verify a write went through by reading one back
+  if (backupData['personal.timetable.events']) {
+    const check = await Storage.get('personal.timetable.events')
+    console.log('[restore] verify read of timetable.events — got', check ? check.length + ' chars' : 'NULL')
   }
 }
 

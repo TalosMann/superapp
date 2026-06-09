@@ -413,19 +413,28 @@ function SettingsView() {
   }
 
   async function confirmRestore() {
+    console.log('[confirmRestore] START')
     setBusy(true)
     try {
-      try { await writeBackupToDestination('pre-restore') }
-      catch (err) {
-        flash('error', `Pre-restore safety backup failed (${err.message}). Restore cancelled.`)
-        setPendingRestore(null); setBusy(false); return
+      // Try pre-restore safety backup but don't bail if it fails — we'd rather
+      // give the user the restore they asked for than refuse over a backup hiccup.
+      try {
+        console.log('[confirmRestore] writing pre-restore safety backup...')
+        const r = await writeBackupToDestination('pre-restore')
+        console.log('[confirmRestore] pre-restore saved:', r.location, r.filename)
+      } catch (err) {
+        console.error('[confirmRestore] pre-restore failed (continuing anyway):', err)
       }
+
+      console.log('[confirmRestore] calling restoreBackup...')
       await restoreBackup(pendingRestore.data)
-      flash('success', 'Restored. Pre-restore backup saved.')
+      console.log('[confirmRestore] restoreBackup completed, reloading in 1.5s')
+      flash('success', 'Restored. App will refresh shortly.')
       setPendingRestore(null)
       setTimeout(() => location.reload(), 1500)
     } catch (err) {
-      flash('error', `Restore failed: ${err.message}`)
+      console.error('[confirmRestore] FAILED:', err?.message || err, JSON.stringify(err))
+      flash('error', `Restore failed: ${err?.message || err}`)
       setPendingRestore(null)
       setBusy(false)
     }
@@ -580,7 +589,7 @@ function SettingsView() {
           title="Restore from backup?"
           message={
             `This will replace ALL current data with the backup contents. ` +
-            `A pre-restore safety backup will be saved to Downloads automatically.` +
+            `A pre-restore safety backup will be saved automatically.` +
             (pendingRestore.exportedAt
               ? `\n\nBackup exported: ${new Date(pendingRestore.exportedAt).toLocaleString()}`
               : '')
@@ -588,6 +597,7 @@ function SettingsView() {
           onCancel={() => setPendingRestore(null)}
           onConfirm={confirmRestore}
           danger={true}
+          confirmLabel="Restore"
         />
       )}
     </div>

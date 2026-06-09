@@ -30,43 +30,101 @@ async function getPassphrase() {
   }
 }
 
+// Module-level singleton — never instantiate SQLiteConnection more than once,
+// otherwise the JS-side registry diverges from the native-side registry and
+// you get "Connection already exists" on createConnection even when
+// isConnection returns false.
+let _sqlite = null
 let _db = null
+let _dbInitPromise = null
+
 async function getDB() {
   if (_db) return _db
+  // Share an in-flight init promise so concurrent callers don't race and
+  // create duplicate connections.
+  if (_dbInitPromise) return _dbInitPromise
+  _dbInitPromise = initDB().finally(() => { _dbInitPromise = null })
+  return _dbInitPromise
+}
+
+async function initDB() {
+  console.log('[Storage] initializing SQLite connection...')
   const { CapacitorSQLite, SQLiteConnection } = await import('@capacitor-community/sqlite')
-  const sqlite = new SQLiteConnection(CapacitorSQLite)
-  const passphrase = await getPassphrase()
+  if (!_sqlite) _sqlite = new SQLiteConnection(CapacitorSQLite)
   const dbName = 'personal'
-  const isConn = (await sqlite.isConnection(dbName, false)).result
-  if (isConn) _db = await sqlite.retrieveConnection(dbName, false)
-  else _db = await sqlite.createConnection(dbName, true, passphrase, 1, false)
+
+  // Try retrieve first (handles warm starts where connection persists from
+  // a previous app session). Fall through to create on cold starts. If
+  // create itself reports "already exists" (stale ghost connection), close
+  // it explicitly then create fresh.
+  try {
+    _db = await _sqlite.retrieveConnection(dbName, false)
+    console.log('[Storage] retrieved existing connection')
+  } catch {
+    try {
+      _db = await _sqlite.createConnection(dbName, false, 'no-encryption', 1, false)
+      console.log('[Storage] created new connection')
+    } catch (createErr) {
+      const msg = String(createErr?.message || createErr)
+      if (msg.includes('already exists')) {
+        console.log('[Storage] connection in inconsistent state, closing then recreating')
+        try { await _sqlite.closeConnection(dbName, false) } catch {}
+        _db = await _sqlite.createConnection(dbName, false, 'no-encryption', 1, false)
+      } else {
+        throw createErr
+      }
+    }
+  }
+
   await _db.open()
   await _db.execute(`CREATE TABLE IF NOT EXISTS store (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)`)
+  console.log('[Storage] ready')
   return _db
+}
+
+// Guard: any null/undefined key is a bug in the caller — log loudly and
+// refuse to write, rather than letting it bubble to SQLite's NOT NULL error.
+function badKey(key, op) {
+  if (key == null || key === '') {
+    console.error(`[Storage.${op}] called with bad key:`, JSON.stringify(key),
+      '— this is a bug in the caller, ignoring.')
+    return true
+  }
+  return false
 }
 
 export const Storage = {
   async get(key) {
+    if (badKey(key, 'get')) return null
     if (!isNative()) return localStorage.getItem(key)
     try {
       const db = await getDB()
       const res = await db.query('SELECT value FROM store WHERE key = ?', [key])
       return res.values?.length ? res.values[0].value : null
-    } catch (e) { console.error('[Storage.get]', e); return null }
+    } catch (e) {
+      console.error('[Storage.get] failed for', key, ':', e?.message || e)
+      return null
+    }
   },
   async set(key, value) {
+    if (badKey(key, 'set')) return
     if (!isNative()) { localStorage.setItem(key, value); return }
     try {
       const db = await getDB()
       await db.run('INSERT OR REPLACE INTO store (key, value) VALUES (?, ?)', [key, value])
-    } catch (e) { console.error('[Storage.set]', e) }
+    } catch (e) {
+      console.error('[Storage.set] failed for', key, ':', e?.message || e)
+    }
   },
   async remove(key) {
+    if (badKey(key, 'remove')) return
     if (!isNative()) { localStorage.removeItem(key); return }
     try {
       const db = await getDB()
       await db.run('DELETE FROM store WHERE key = ?', [key])
-    } catch (e) { console.error('[Storage.remove]', e) }
+    } catch (e) {
+      console.error('[Storage.remove] failed for', key, ':', e?.message || e)
+    }
   },
   async clearAll() {
     if (!isNative()) { localStorage.clear(); return }

@@ -99,7 +99,7 @@ export function Stat({ label, value, sub, color = T.text }) {
 
 // ── Inline confirm dialog ────────────────────────────────────────────────────
 
-export function Confirm({ title, message, onConfirm, onCancel, danger = true }) {
+export function Confirm({ title, message, onConfirm, onCancel, danger = true, confirmLabel }) {
   return (
     <div style={{
       position: 'fixed', inset: 0, background: 'rgba(0,0,0,.7)', zIndex: 300,
@@ -116,7 +116,7 @@ export function Confirm({ title, message, onConfirm, onCancel, danger = true }) 
           <button onClick={onConfirm} style={{
             flex: 1, background: danger ? T.bad : T.accent, border: 'none', borderRadius: 10,
             padding: 12, color: '#fff', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
-          }}>{danger ? 'Delete' : 'Confirm'}</button>
+          }}>{confirmLabel || (danger ? 'Delete' : 'Confirm')}</button>
         </div>
       </div>
     </div>
