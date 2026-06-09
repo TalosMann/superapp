@@ -28,7 +28,8 @@ import { uid, fmtDate, todayStr } from '../../utils.js'
 import { loadJSON, saveJSON, KEYS } from '../../storage.js'
 import {
   STARTER_EXERCISES, STARTER_ACTIVITIES,
-  workoutTotals, sportSessionStats, SPORT_MODE_BY_ID,
+  workoutTotals, sportSessionSummary, SPORT_MODE_BY_ID,
+  migrateSportSession, sportActivities,
 } from './data.js'
 import WorkoutLogger from './WorkoutLogger.jsx'
 import SportLogger from './SportLogger.jsx'
@@ -52,7 +53,7 @@ export default function Gym() {
         loadJSON(KEYS.GYM_EXERCISES, null),
         loadJSON(KEYS.GYM_SPORTS, null),
       ])
-      setSessions(s)
+      setSessions(s.map(migrateSportSession))
       // First-launch seeding
       setExercises(e === null
         ? STARTER_EXERCISES.map(ex => ({ id: uid('ex'), ...ex }))
@@ -133,9 +134,12 @@ export default function Gym() {
           matches = true
         }
       } else if (session.kind === 'sport') {
-        const name = session.name.toLowerCase()
+        // Candidate names: the session title plus each activity it contains.
+        const names = [session.name, ...sportActivities(session).map(a => a.name)]
+          .filter(Boolean)
+          .map(n => n.toLowerCase())
         for (const t of linkedTitles) {
-          if (t.includes(name) || name.includes(t)) { matches = true; break }
+          if (names.some(n => t.includes(n) || n.includes(t))) { matches = true; break }
         }
       }
       if (!matches) return goal
@@ -274,6 +278,7 @@ export default function Gym() {
       {(modal?.type === 'sport' || modal?.type === 'sportEdit') && (
         <SportLogger
           initial={modal.initial}
+          sessions={sessions}
           activities={activities}
           onAddActivity={addActivity}
           onSave={saveSession}
@@ -350,9 +355,16 @@ function SessionCard({ session, activities, onClick }) {
     )
   }
   // Sport
-  const act = activities.find(a => a.id === session.activityId)
-  const stats = sportSessionStats(session)
-  const accent = act?.color || T.ok
+  const acts = sportActivities(session)
+  const summary = sportSessionSummary(session)
+  const firstAct = activities.find(a => a.id === acts[0]?.activityId)
+  const accent = firstAct?.color || T.ok
+
+  const parts = [`${summary.count} ${summary.count === 1 ? 'activity' : 'activities'}`]
+  if (summary.minutes > 0) parts.push(`${summary.minutes} min`)
+  if (summary.sets > 0) parts.push(`${summary.sets} sets`)
+  if (summary.reps > 0) parts.push(`${summary.reps} reps`)
+
   return (
     <div onClick={onClick} style={{
       background: T.bg2, border: `1px solid ${T.border}`,
@@ -365,15 +377,13 @@ function SessionCard({ session, activities, onClick }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{session.name}</div>
           <div className="mono" style={{ fontSize: 11, color: T.text3, marginTop: 2 }}>
-            {session.mode === 'duration' && `${stats.minutes} min`}
-            {session.mode === 'distance' && (
-              `${stats.distance}${stats.unit} · ${stats.minutes}min` +
-              (stats.pace ? ` · ${stats.pace.toFixed(2)} min/${stats.unit}` : '')
-            )}
-            {session.mode === 'sets' && (
-              `${stats.setCount} sets · ${stats.totalReps} reps`
-            )}
+            {parts.join(' · ')}
           </div>
+          {acts.length > 1 && (
+            <div style={{ fontSize: 11, color: T.text4, marginTop: 3 }}>
+              {acts.map(a => a.name).join(', ')}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -398,7 +408,9 @@ function LibraryView({ kind, items, sessions, onPick }) {
       }
       return n
     } else {
-      return sessions.filter(s => s.kind === 'sport' && s.activityId === item.id).length
+      return sessions.filter(s =>
+        s.kind === 'sport' && sportActivities(s).some(a => a.activityId === item.id)
+      ).length
     }
   }
 

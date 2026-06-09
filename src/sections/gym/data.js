@@ -8,13 +8,20 @@
  *       { exerciseId, name, isBodyweight, sets: [{ weight, reps, notes? }] }
  *   ], notes }
  *
- * Sport session:
- *   { id, kind: 'sport', activityId, name, date, mode, ...modeData, notes }
+ * Sport session (new multi-activity shape):
+ *   { id, kind: 'sport', date, name, notes, activities: [
+ *       { activityId, name, mode, ...modeData }
+ *   ] }
  *
- *   where mode-specific data is:
+ *   where each activity entry's mode-specific data is:
  *     duration:   { minutes }
  *     distance:   { distance, unit, minutes }
- *     sets:       { sets: [{ reps?, seconds?, distance?, unit? }] }
+ *     setsreps:   { setCount, repsPerSet }            // basic "3 sets × 5 reps"
+ *     sets:       { sets: [{ reps?, seconds?, distance? }], unit? }  // detailed
+ *
+ *   Legacy sport sessions were flat (a single activity per session:
+ *   { activityId, name, mode, ...modeData }). migrateSportSession() and
+ *   sportActivities() transparently upgrade/read those old records.
  *
  * Exercise library entry:
  *   { id, name, isBodyweight, defaultReps, defaultWeight, category, notes }
@@ -28,7 +35,8 @@
 export const SPORT_MODES = [
   { id: 'duration', label: 'Duration',          shortLabel: 'time' },
   { id: 'distance', label: 'Distance + time',   shortLabel: 'distance' },
-  { id: 'sets',     label: 'Sets / reps drill', shortLabel: 'sets' },
+  { id: 'setsreps', label: 'Sets × reps',       shortLabel: 'sets×reps' },
+  { id: 'sets',     label: 'Sets (detailed)',   shortLabel: 'sets' },
 ]
 
 export const SPORT_MODE_BY_ID = Object.fromEntries(SPORT_MODES.map(m => [m.id, m]))
@@ -125,7 +133,8 @@ export function workoutTotals(session) {
 }
 
 /**
- * For a sport session: derived stats useful for display.
+ * Derived stats for ONE activity entry (or a legacy flat sport session —
+ * both expose the same { mode, ...modeData } fields).
  *   - duration mode: just minutes
  *   - distance mode: minutes, distance, pace (min/km if unit is km, else null)
  *   - sets mode: totals across sets
@@ -142,6 +151,11 @@ export function sportSessionStats(session) {
     if (session.unit === 'mi' && distance > 0 && minutes > 0) pace = minutes / distance
     return { distance, minutes, pace, unit: session.unit }
   }
+  if (session.mode === 'setsreps') {
+    const setCount = Number(session.setCount) || 0
+    const repsPerSet = Number(session.repsPerSet) || 0
+    return { setCount, repsPerSet, totalReps: setCount * repsPerSet }
+  }
   if (session.mode === 'sets') {
     let totalReps = 0, totalSeconds = 0, totalDistance = 0, setCount = 0
     for (const set of (session.sets || [])) {
@@ -153,6 +167,78 @@ export function sportSessionStats(session) {
     return { setCount, totalReps, totalSeconds, totalDistance, unit: session.unit }
   }
   return {}
+}
+
+// ── Multi-activity sport session helpers ────────────────────────────────────
+
+/**
+ * Upgrade a legacy flat sport session (single activity per session) into the
+ * new multi-activity shape. Idempotent: new-shape sessions and workout
+ * sessions pass through unchanged.
+ */
+export function migrateSportSession(s) {
+  if (!s || s.kind !== 'sport') return s
+  if (Array.isArray(s.activities)) return s  // already migrated
+
+  const entry = { activityId: s.activityId, name: s.name, mode: s.mode }
+  if (s.mode === 'duration') {
+    entry.minutes = s.minutes
+  } else if (s.mode === 'distance') {
+    entry.distance = s.distance
+    entry.unit = s.unit
+    entry.minutes = s.minutes
+  } else if (s.mode === 'sets') {
+    entry.sets = s.sets || []
+    entry.unit = s.unit || null
+  }
+
+  return {
+    id: s.id,
+    kind: 'sport',
+    date: s.date,
+    name: s.name || 'Sport session',
+    activities: [entry],
+    notes: s.notes || '',
+  }
+}
+
+/**
+ * Return a sport session's activity entries, tolerating legacy flat records.
+ */
+export function sportActivities(session) {
+  if (Array.isArray(session?.activities)) return session.activities
+  return migrateSportSession(session).activities
+}
+
+/**
+ * Aggregate display summary for a whole sport session (across its activities).
+ * Returns { count, minutes, sets, reps, distance }.
+ */
+export function sportSessionSummary(session) {
+  const acts = sportActivities(session)
+  let minutes = 0, sets = 0, reps = 0, distance = 0
+  for (const a of acts) {
+    const st = sportSessionStats(a)
+    minutes += st.minutes || 0
+    if (a.mode === 'sets' || a.mode === 'setsreps') { sets += st.setCount || 0; reps += st.totalReps || 0 }
+    if (a.mode === 'distance') distance += st.distance || 0
+  }
+  return { count: acts.length, minutes, sets, reps, distance }
+}
+
+/**
+ * Most recent sport session matching a session name (case-insensitive).
+ * Used by the "Copy last session" prefill in SportLogger.
+ */
+export function lastSportSession(name, sessions) {
+  const key = (name || '').toLowerCase()
+  let latest = null
+  for (const s of sessions) {
+    if (s.kind !== 'sport') continue
+    if ((s.name || '').toLowerCase() !== key) continue
+    if (!latest || s.date > latest.date) latest = s
+  }
+  return latest
 }
 
 // ── Cross-session aggregations (for progress views) ─────────────────────────
@@ -183,15 +269,18 @@ export function exerciseProgress(exerciseId, sessions) {
 }
 
 /**
- * For a sport activity, return [{ date, ...stats }] across all sport sessions
- * of that activity, sorted ascending.
+ * For a sport activity, return [{ date, ...stats }] across every session that
+ * contains that activity (a session may contain it more than once → one trail
+ * point per entry), sorted ascending.
  */
 export function activityProgress(activityId, sessions) {
   const out = []
   for (const s of sessions) {
     if (s.kind !== 'sport') continue
-    if (s.activityId !== activityId) continue
-    out.push({ date: s.date, ...sportSessionStats(s), mode: s.mode, sessionId: s.id })
+    for (const a of sportActivities(s)) {
+      if (a.activityId !== activityId) continue
+      out.push({ date: s.date, ...sportSessionStats(a), mode: a.mode, sessionId: s.id })
+    }
   }
   return out.sort((a, b) => a.date.localeCompare(b.date))
 }

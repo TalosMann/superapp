@@ -1,12 +1,19 @@
 /**
  * SportLogger.jsx — Modal for creating/editing a sport session.
  *
+ * A sport session mirrors a workout: it has a name (e.g. "Football training")
+ * and contains one or more ACTIVITY ENTRIES, each measured by its own mode:
+ *   duration: minutes
+ *   distance: distance + unit + minutes (pace derived)
+ *   sets:     list of sets with reps / seconds / distance per set
+ *
  * Flow:
- *  - Pick an activity (from library), or add a new activity inline
- *  - Form fields adapt to the activity's mode:
- *      duration: minutes
- *      distance: distance + unit + minutes (pace derived)
- *      sets:     list of sets with reps / seconds / distance per set
+ *  - Name the session (optional — defaults to the lone activity's name, or
+ *    "Sport session" when several are logged)
+ *  - Add activities from the library (or create one inline); each gets its own
+ *    inline inputs based on its mode
+ *  - Optionally "Copy last <name>" to prefill from the previous session of the
+ *    same name
  */
 
 import { useState, useEffect } from 'react'
@@ -14,239 +21,238 @@ import { T, S } from '../../theme.js'
 import { Modal, Confirm } from '../../shared.jsx'
 import Icon from '../../Icon.jsx'
 import { todayStr } from '../../utils.js'
-import { SPORT_MODES, DISTANCE_UNITS, sportSessionStats } from './data.js'
+import {
+  SPORT_MODES, DISTANCE_UNITS, sportSessionStats,
+  sportActivities, lastSportSession,
+} from './data.js'
 
-export default function SportLogger({ initial, activities, onAddActivity, onSave, onDelete, onCancel }) {
+// Build a fresh activity row (with empty inputs) from a library activity.
+function rowFromActivity(a) {
+  const row = {
+    activityId: a.id,
+    name: a.name,
+    mode: a.mode,
+    color: a.color,
+  }
+  if (a.mode === 'duration') {
+    row.minutes = ''
+  } else if (a.mode === 'distance') {
+    row.distance = ''
+    row.minutes = ''
+    row.unit = a.defaultUnit || 'km'
+  } else if (a.mode === 'setsreps') {
+    row.setCount = ''
+    row.repsPerSet = ''
+  } else if (a.mode === 'sets') {
+    row.sets = [{ reps: '', seconds: '', distance: '' }]
+    row.unit = a.defaultUnit || null
+  }
+  return row
+}
+
+// Normalise an existing session's saved entries into editable rows.
+function rowsFromSession(session, activities) {
+  return sportActivities(session).map(e => {
+    const lib = activities.find(a => a.id === e.activityId)
+    const row = {
+      activityId: e.activityId,
+      name: e.name,
+      mode: e.mode,
+      color: lib?.color,
+    }
+    if (e.mode === 'duration') {
+      row.minutes = e.minutes ?? ''
+    } else if (e.mode === 'distance') {
+      row.distance = e.distance ?? ''
+      row.minutes = e.minutes ?? ''
+      row.unit = e.unit || lib?.defaultUnit || 'km'
+    } else if (e.mode === 'setsreps') {
+      row.setCount = e.setCount ?? ''
+      row.repsPerSet = e.repsPerSet ?? ''
+    } else if (e.mode === 'sets') {
+      row.sets = (e.sets && e.sets.length)
+        ? e.sets.map(s => ({ reps: s.reps ?? '', seconds: s.seconds ?? '', distance: s.distance ?? '' }))
+        : [{ reps: '', seconds: '', distance: '' }]
+      row.unit = e.unit || lib?.defaultUnit || null
+    }
+    return row
+  })
+}
+
+function rowHasData(r) {
+  if (r.mode === 'duration') return Number(r.minutes) > 0
+  if (r.mode === 'distance') return Number(r.distance) > 0 || Number(r.minutes) > 0
+  if (r.mode === 'setsreps') return Number(r.setCount) > 0 && Number(r.repsPerSet) > 0
+  if (r.mode === 'sets') {
+    return (r.sets || []).some(s =>
+      Number(s.reps) > 0 || Number(s.seconds) > 0 || Number(s.distance) > 0)
+  }
+  return false
+}
+
+export default function SportLogger({ initial, sessions = [], activities, onAddActivity, onSave, onDelete, onCancel }) {
   const isEdit = !!initial
   const [date, setDate] = useState(initial?.date || todayStr())
-  const [activity, setActivity] = useState(
-    initial ? activities.find(a => a.id === initial.activityId) : null
-  )
-  const [showActivityPicker, setShowActivityPicker] = useState(!initial)
-
-  // Mode-specific state
-  const [minutes, setMinutes] = useState(initial?.minutes || '')
-  const [distance, setDistance] = useState(initial?.distance || '')
-  const [unit, setUnit] = useState(initial?.unit || 'km')
-  const [sets, setSets] = useState(initial?.sets || [{ reps: '', seconds: '', distance: '' }])
+  const [name, setName] = useState(initial?.name || '')
+  const [rows, setRows] = useState(initial ? rowsFromSession(initial, activities) : [])
   const [notes, setNotes] = useState(initial?.notes || '')
 
+  const [showActivityPicker, setShowActivityPicker] = useState(false)
   const [confirmDel, setConfirmDel] = useState(false)
 
-  // When picking an activity, reset mode-specific state appropriately
-  function pickActivity(a) {
-    setActivity(a)
-    if (a.mode === 'distance') {
-      setUnit(a.defaultUnit || 'km')
-    } else if (a.mode === 'sets') {
-      setUnit(a.defaultUnit || null)
-      // For sets mode, prefill one empty set if there isn't one
-      if (sets.length === 0) setSets([{ reps: '', seconds: '', distance: '' }])
-    }
+  // Offer to copy the previous session of the same name, once, when the name
+  // matches a prior session and nothing's been added yet.
+  const prior = (!isEdit && name.trim() && rows.length === 0)
+    ? lastSportSession(name.trim(), sessions)
+    : null
+
+  function copyLast() {
+    if (!prior) return
+    setRows(rowsFromSession(prior, activities))
+  }
+
+  function addActivityRow(a) {
+    setRows(prev => [...prev, rowFromActivity(a)])
     setShowActivityPicker(false)
   }
 
-  function addSet() {
-    const last = sets[sets.length - 1] || { reps: '', seconds: '', distance: '' }
-    setSets([...sets, { reps: last.reps, seconds: last.seconds, distance: last.distance }])
+  function removeRow(i) {
+    setRows(prev => prev.filter((_, idx) => idx !== i))
   }
 
-  function updateSet(i, field, value) {
-    setSets(sets.map((s, idx) => idx === i ? { ...s, [field]: value } : s))
+  function updateRow(i, field, value) {
+    setRows(prev => prev.map((r, idx) => idx === i ? { ...r, [field]: value } : r))
   }
 
-  function removeSet(i) {
-    setSets(sets.filter((_, idx) => idx !== i))
+  function addSet(i) {
+    setRows(prev => prev.map((r, idx) => {
+      if (idx !== i) return r
+      const last = r.sets[r.sets.length - 1] || { reps: '', seconds: '', distance: '' }
+      return { ...r, sets: [...r.sets, { reps: last.reps, seconds: last.seconds, distance: last.distance }] }
+    }))
+  }
+
+  function updateSet(i, setIdx, field, value) {
+    setRows(prev => prev.map((r, idx) => {
+      if (idx !== i) return r
+      return { ...r, sets: r.sets.map((s, j) => j === setIdx ? { ...s, [field]: value } : s) }
+    }))
+  }
+
+  function removeSet(i, setIdx) {
+    setRows(prev => prev.map((r, idx) => {
+      if (idx !== i) return r
+      return { ...r, sets: r.sets.filter((_, j) => j !== setIdx) }
+    }))
   }
 
   function handleSave() {
-    if (!activity) return
-    const session = {
+    const activitiesOut = rows
+      .map(r => {
+        const base = { activityId: r.activityId, name: r.name, mode: r.mode }
+        if (r.mode === 'duration') {
+          return { ...base, minutes: Number(r.minutes) || 0 }
+        }
+        if (r.mode === 'distance') {
+          return { ...base, distance: Number(r.distance) || 0, unit: r.unit, minutes: Number(r.minutes) || 0 }
+        }
+        if (r.mode === 'setsreps') {
+          return { ...base, setCount: Number(r.setCount) || 0, repsPerSet: Number(r.repsPerSet) || 0 }
+        }
+        if (r.mode === 'sets') {
+          return {
+            ...base,
+            unit: r.unit || null,
+            sets: (r.sets || [])
+              .map(s => ({ reps: Number(s.reps) || 0, seconds: Number(s.seconds) || 0, distance: Number(s.distance) || 0 }))
+              .filter(s => s.reps > 0 || s.seconds > 0 || s.distance > 0),
+          }
+        }
+        return base
+      })
+      .filter((r, idx) => rowHasData(rows[idx]))
+
+    if (activitiesOut.length === 0) return
+
+    const sessionName = name.trim() ||
+      (activitiesOut.length === 1 ? activitiesOut[0].name : 'Sport session')
+
+    onSave({
       kind: 'sport',
       date,
-      activityId: activity.id,
-      name: activity.name,
-      mode: activity.mode,
+      name: sessionName,
+      activities: activitiesOut,
       notes: notes.trim(),
-    }
-    if (activity.mode === 'duration') {
-      session.minutes = Number(minutes) || 0
-    } else if (activity.mode === 'distance') {
-      session.distance = Number(distance) || 0
-      session.unit = unit
-      session.minutes = Number(minutes) || 0
-    } else if (activity.mode === 'sets') {
-      session.sets = sets
-        .map(s => ({
-          reps: Number(s.reps) || 0,
-          seconds: Number(s.seconds) || 0,
-          distance: Number(s.distance) || 0,
-        }))
-        .filter(s => s.reps > 0 || s.seconds > 0 || s.distance > 0)
-      session.unit = unit
-    }
-    onSave(session)
+    })
   }
 
-  // Validate
-  const canSave = activity && (
-    (activity.mode === 'duration' && Number(minutes) > 0) ||
-    (activity.mode === 'distance' && Number(distance) > 0) ||
-    (activity.mode === 'sets' && sets.some(s => Number(s.reps) > 0 || Number(s.seconds) > 0 || Number(s.distance) > 0))
-  )
-
-  const previewStats = activity ? sportSessionStats({
-    mode: activity.mode, minutes, distance, unit, sets,
-  }) : null
+  const canSave = rows.some(rowHasData)
 
   return (
     <Modal title={isEdit ? 'Edit session' : 'New sport session'} onClose={onCancel} accent={T.gym}>
       <label style={S.label}>Date</label>
       <input type="date" style={S.inputMono} value={date} onChange={e => setDate(e.target.value)} />
 
-      <label style={S.label}>Activity</label>
-      {activity ? (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          background: T.bg3, border: `1px solid ${activity.color || T.gym}`,
-          borderLeft: `3px solid ${activity.color || T.gym}`,
-          borderRadius: 10, padding: 12,
-        }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{activity.name}</div>
-            <div style={{ fontSize: 11, color: T.text3, marginTop: 2 }}>
-              {SPORT_MODES.find(m => m.id === activity.mode)?.label}
-            </div>
-          </div>
-          {!isEdit && (
-            <button onClick={() => { setActivity(null); setShowActivityPicker(true) }}
-              style={{ ...S.iconBtn, color: T.text3 }}>
-              <Icon name="close" size={16} />
-            </button>
-          )}
-        </div>
-      ) : (
-        <button onClick={() => setShowActivityPicker(true)} style={{
-          width: '100%', background: 'transparent', border: `1px dashed ${T.border}`,
-          borderRadius: 10, padding: 12, color: T.text3, fontSize: 13, fontWeight: 600,
-          cursor: 'pointer', fontFamily: 'inherit',
-        }}>Pick an activity</button>
+      <label style={S.label}>Session name</label>
+      <input style={S.input} value={name} onChange={e => setName(e.target.value)}
+        placeholder="e.g. Football training" />
+
+      {prior && (
+        <button onClick={copyLast} style={{
+          width: '100%', background: 'transparent', border: `1px dashed ${T.gym}`,
+          borderRadius: 10, padding: 10, marginTop: 8, color: T.gym,
+          fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+        }}>Copy last "{name.trim()}" session</button>
       )}
 
-      {/* Mode-specific fields */}
-      {activity?.mode === 'duration' && (
-        <>
-          <label style={S.label}>Duration (minutes)</label>
-          <input type="number" inputMode="numeric" style={S.inputMono}
-            value={minutes} onChange={e => setMinutes(e.target.value)}
-            placeholder="0" autoFocus />
-        </>
-      )}
+      <label style={S.label}>Activities</label>
+      {rows.map((row, i) => (
+        <ActivityRow
+          key={i}
+          row={row}
+          onUpdate={(field, value) => updateRow(i, field, value)}
+          onRemove={() => removeRow(i)}
+          onAddSet={() => addSet(i)}
+          onUpdateSet={(setIdx, field, value) => updateSet(i, setIdx, field, value)}
+          onRemoveSet={(setIdx) => removeSet(i, setIdx)}
+        />
+      ))}
 
-      {activity?.mode === 'distance' && (
-        <>
-          <div style={{ display: 'flex', gap: 10 }}>
-            <div style={{ flex: 2 }}>
-              <label style={S.label}>Distance</label>
-              <input type="number" inputMode="decimal" step="0.01" style={S.inputMono}
-                value={distance} onChange={e => setDistance(e.target.value)}
-                placeholder="0" autoFocus />
-            </div>
-            <div style={{ flex: 1 }}>
-              <label style={S.label}>Unit</label>
-              <select value={unit} onChange={e => setUnit(e.target.value)}
-                style={{ ...S.input, appearance: 'none', cursor: 'pointer' }}>
-                {DISTANCE_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
-              </select>
-            </div>
-          </div>
-          <label style={S.label}>Duration (minutes)</label>
-          <input type="number" inputMode="numeric" style={S.inputMono}
-            value={minutes} onChange={e => setMinutes(e.target.value)}
-            placeholder="0" />
-          {previewStats?.pace && (
-            <div style={{
-              marginTop: 8, padding: '8px 12px', background: T.bg3, borderRadius: 8,
-              fontSize: 12, color: T.text2, display: 'flex', justifyContent: 'space-between',
-            }}>
-              <span>Pace</span>
-              <span className="mono">{previewStats.pace.toFixed(2)} min/{unit}</span>
-            </div>
-          )}
-        </>
-      )}
+      <button onClick={() => setShowActivityPicker(true)} style={{
+        width: '100%', background: 'transparent', border: `1px dashed ${T.border}`,
+        borderRadius: 10, padding: 12, color: T.text3, fontSize: 13, fontWeight: 600,
+        cursor: 'pointer', fontFamily: 'inherit',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+        marginTop: 6,
+      }}>
+        <Icon name="plus" size={14} stroke={3} /> Add activity
+      </button>
 
-      {activity?.mode === 'sets' && (
-        <>
-          <label style={S.label}>Sets</label>
-          <div style={{ marginBottom: 8 }}>
-            {sets.map((set, i) => (
-              <div key={i} style={{
-                background: T.bg3, border: `1px solid ${T.border}`, borderRadius: 8,
-                padding: 8, marginBottom: 6,
-              }}>
-                <div style={{
-                  display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6,
-                }}>
-                  <div style={{ fontSize: 11, color: T.text4, fontWeight: 700 }}>Set {i + 1}</div>
-                  <div style={{ flex: 1 }} />
-                  <button onClick={() => removeSet(i)} style={{
-                    ...S.iconBtn, color: T.text4, padding: 2,
-                  }}>
-                    <Icon name="close" size={12} />
-                  </button>
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <SetFieldInput label="Reps" value={set.reps}
-                    onChange={v => updateSet(i, 'reps', v)} />
-                  <SetFieldInput label="Seconds" value={set.seconds}
-                    onChange={v => updateSet(i, 'seconds', v)} />
-                  <SetFieldInput label={`Dist${unit ? ` (${unit})` : ''}`} value={set.distance}
-                    onChange={v => updateSet(i, 'distance', v)} />
-                </div>
-              </div>
-            ))}
-            <button onClick={addSet} style={{
-              width: '100%', background: 'transparent', border: 'none',
-              padding: '6px 8px', color: T.gym, fontSize: 12, fontWeight: 600,
-              cursor: 'pointer', fontFamily: 'inherit',
-            }}>+ Add set</button>
-          </div>
-        </>
-      )}
+      <label style={S.label}>Notes (optional)</label>
+      <textarea style={{ ...S.input, minHeight: 50, resize: 'vertical', fontFamily: 'inherit' }}
+        value={notes} onChange={e => setNotes(e.target.value)} />
 
-      {activity && (
-        <>
-          <label style={S.label}>Notes (optional)</label>
-          <textarea style={{ ...S.input, minHeight: 50, resize: 'vertical', fontFamily: 'inherit' }}
-            value={notes} onChange={e => setNotes(e.target.value)} />
+      <button onClick={handleSave} disabled={!canSave} style={{
+        ...S.btnPrimary, marginTop: 18, background: T.gym, color: '#fff',
+        opacity: canSave ? 1 : 0.5,
+      }}>{isEdit ? 'Save changes' : 'Log session'}</button>
 
-          <button onClick={handleSave} disabled={!canSave} style={{
-            ...S.btnPrimary, marginTop: 18, background: T.gym, color: '#fff',
-            opacity: canSave ? 1 : 0.5,
-          }}>{isEdit ? 'Save changes' : 'Log session'}</button>
-
-          {isEdit && (
-            <button onClick={() => setConfirmDel(true)} style={{
-              width: '100%', background: 'transparent', border: `1px solid ${T.bad}`,
-              borderRadius: 12, padding: 12, marginTop: 8, color: T.bad,
-              fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-            }}>Delete session</button>
-          )}
-        </>
+      {isEdit && (
+        <button onClick={() => setConfirmDel(true)} style={{
+          width: '100%', background: 'transparent', border: `1px solid ${T.bad}`,
+          borderRadius: 12, padding: 12, marginTop: 8, color: T.bad,
+          fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+        }}>Delete session</button>
       )}
 
       {showActivityPicker && (
         <ActivityPicker
           activities={activities}
-          onPick={pickActivity}
+          onPick={addActivityRow}
           onAddNew={(newAct) => {
-            onAddActivity(newAct).then(saved => pickActivity(saved))
+            onAddActivity(newAct).then(saved => addActivityRow(saved))
           }}
-          onCancel={() => {
-            setShowActivityPicker(false)
-            if (!activity) onCancel()  // cancel whole modal if no activity selected
-          }}
+          onCancel={() => setShowActivityPicker(false)}
         />
       )}
 
@@ -260,6 +266,150 @@ export default function SportLogger({ initial, activities, onAddActivity, onSave
         />
       )}
     </Modal>
+  )
+}
+
+// ── One activity entry inside the session form ──────────────────────────────
+
+function ActivityRow({ row, onUpdate, onRemove, onAddSet, onUpdateSet, onRemoveSet }) {
+  const accent = row.color || T.gym
+  const previewPace = row.mode === 'distance'
+    ? sportSessionStats({ mode: 'distance', distance: row.distance, minutes: row.minutes, unit: row.unit }).pace
+    : null
+
+  return (
+    <div style={{
+      background: T.bg3, border: `1px solid ${T.border}`,
+      borderLeft: `3px solid ${accent}`, borderRadius: 10,
+      padding: 10, marginBottom: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 600, color: T.text }}>{row.name}</div>
+          <div style={{ fontSize: 10, color: T.text3, marginTop: 1 }}>
+            {SPORT_MODES.find(m => m.id === row.mode)?.label}
+          </div>
+        </div>
+        <button onClick={onRemove} style={{ ...S.iconBtn, color: T.text4, padding: 4 }}>
+          <Icon name="close" size={14} />
+        </button>
+      </div>
+
+      {row.mode === 'duration' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="number" inputMode="numeric"
+            value={row.minutes} onChange={e => onUpdate('minutes', e.target.value)}
+            placeholder="0"
+            style={{
+              flex: 1, background: T.bg2, border: `1px solid ${T.border}`,
+              borderRadius: 6, padding: '6px 8px', color: T.text, fontSize: 13,
+              fontFamily: "'DM Mono', monospace", outline: 'none', textAlign: 'center',
+            }} />
+          <div style={{ fontSize: 12, color: T.text3 }}>minutes</div>
+        </div>
+      )}
+
+      {row.mode === 'distance' && (
+        <>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end' }}>
+            <div style={{ flex: 2 }}>
+              <div style={{ fontSize: 9, color: T.text4, marginBottom: 2 }}>Distance</div>
+              <input type="number" inputMode="decimal" step="0.01"
+                value={row.distance} onChange={e => onUpdate('distance', e.target.value)}
+                placeholder="0"
+                style={{
+                  width: '100%', background: T.bg2, border: `1px solid ${T.border}`,
+                  borderRadius: 6, padding: '6px 8px', color: T.text, fontSize: 13,
+                  fontFamily: "'DM Mono', monospace", outline: 'none', textAlign: 'center',
+                  boxSizing: 'border-box',
+                }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 9, color: T.text4, marginBottom: 2 }}>Unit</div>
+              <select value={row.unit} onChange={e => onUpdate('unit', e.target.value)}
+                style={{
+                  width: '100%', background: T.bg2, border: `1px solid ${T.border}`,
+                  borderRadius: 6, padding: '6px 8px', color: T.text, fontSize: 13,
+                  fontFamily: 'inherit', outline: 'none', appearance: 'none', cursor: 'pointer',
+                  boxSizing: 'border-box',
+                }}>
+                {DISTANCE_UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 1.4 }}>
+              <div style={{ fontSize: 9, color: T.text4, marginBottom: 2 }}>Minutes</div>
+              <input type="number" inputMode="numeric"
+                value={row.minutes} onChange={e => onUpdate('minutes', e.target.value)}
+                placeholder="0"
+                style={{
+                  width: '100%', background: T.bg2, border: `1px solid ${T.border}`,
+                  borderRadius: 6, padding: '6px 8px', color: T.text, fontSize: 13,
+                  fontFamily: "'DM Mono', monospace", outline: 'none', textAlign: 'center',
+                  boxSizing: 'border-box',
+                }} />
+            </div>
+          </div>
+          {previewPace && (
+            <div style={{
+              marginTop: 8, padding: '6px 10px', background: T.bg2, borderRadius: 8,
+              fontSize: 12, color: T.text2, display: 'flex', justifyContent: 'space-between',
+            }}>
+              <span>Pace</span>
+              <span className="mono">{previewPace.toFixed(2)} min/{row.unit}</span>
+            </div>
+          )}
+        </>
+      )}
+
+      {row.mode === 'setsreps' && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input type="number" inputMode="numeric"
+            value={row.setCount} onChange={e => onUpdate('setCount', e.target.value)}
+            placeholder="0"
+            style={{
+              flex: 1, background: T.bg2, border: `1px solid ${T.border}`,
+              borderRadius: 6, padding: '6px 8px', color: T.text, fontSize: 13,
+              fontFamily: "'DM Mono', monospace", outline: 'none', textAlign: 'center',
+            }} />
+          <div style={{ fontSize: 12, color: T.text3 }}>sets ×</div>
+          <input type="number" inputMode="numeric"
+            value={row.repsPerSet} onChange={e => onUpdate('repsPerSet', e.target.value)}
+            placeholder="0"
+            style={{
+              flex: 1, background: T.bg2, border: `1px solid ${T.border}`,
+              borderRadius: 6, padding: '6px 8px', color: T.text, fontSize: 13,
+              fontFamily: "'DM Mono', monospace", outline: 'none', textAlign: 'center',
+            }} />
+          <div style={{ fontSize: 12, color: T.text3 }}>reps</div>
+        </div>
+      )}
+
+      {row.mode === 'sets' && (
+        <>
+          {(row.sets || []).map((set, j) => (
+            <div key={j} style={{
+              display: 'flex', alignItems: 'flex-end', gap: 6, marginBottom: 6,
+            }}>
+              <div style={{ fontSize: 11, color: T.text4, width: 18, fontWeight: 700, paddingBottom: 6 }}>{j + 1}</div>
+              <SetFieldInput label="Reps" value={set.reps}
+                onChange={v => onUpdateSet(j, 'reps', v)} />
+              <SetFieldInput label="Seconds" value={set.seconds}
+                onChange={v => onUpdateSet(j, 'seconds', v)} />
+              <SetFieldInput label={`Dist${row.unit ? ` (${row.unit})` : ''}`} value={set.distance}
+                onChange={v => onUpdateSet(j, 'distance', v)} />
+              <button onClick={() => onRemoveSet(j)} style={{ ...S.iconBtn, color: T.text4, padding: 2, paddingBottom: 6 }}>
+                <Icon name="close" size={12} />
+              </button>
+            </div>
+          ))}
+          <button onClick={onAddSet} style={{
+            width: '100%', background: 'transparent', border: 'none',
+            padding: '6px 8px', marginTop: 2, color: accent, fontSize: 12, fontWeight: 600,
+            cursor: 'pointer', fontFamily: 'inherit',
+          }}>+ Add set</button>
+        </>
+      )}
+    </div>
   )
 }
 
@@ -342,7 +492,8 @@ function ActivityPicker({ activities, onPick, onAddNew, onCancel }) {
                   <div style={{ fontSize: 11, color: T.text3, marginTop: 2 }}>
                     {m.id === 'duration' && 'Just minutes — e.g. dodgeball, juggling'}
                     {m.id === 'distance' && 'Distance + time — e.g. running, swimming laps'}
-                    {m.id === 'sets' && 'Sets/reps drill — e.g. sprints, plyometrics'}
+                    {m.id === 'setsreps' && 'Just sets and reps — e.g. 3 sets of 5 figure 8s'}
+                    {m.id === 'sets' && 'Per-set reps / time / distance — e.g. sprints'}
                   </div>
                 </button>
               ))}

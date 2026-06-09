@@ -125,7 +125,7 @@ export function ActivityProgress({ activity, sessions, onBack, onOpenSession }) 
 
       {activity.mode === 'duration' && <DurationProgress trail={trail} onOpenSession={onOpenSession} />}
       {activity.mode === 'distance' && <DistanceProgress trail={trail} activity={activity} onOpenSession={onOpenSession} />}
-      {activity.mode === 'sets'     && <SetsProgress trail={trail} onOpenSession={onOpenSession} />}
+      {(activity.mode === 'sets' || activity.mode === 'setsreps') && <SetsProgress trail={trail} onOpenSession={onOpenSession} />}
     </div>
   )
 }
