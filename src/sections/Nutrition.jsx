@@ -62,21 +62,23 @@ export default function Nutrition() {
   const [weights, setWeights] = useState({})
   const [targets, setTargets] = useState(DEFAULT_TARGETS)
   const [foods, setFoods] = useState([])
+  const [savedMeals, setSavedMeals] = useState([])
   const [date, setDate] = useState(todayStr())
-  const [view, setView] = useState('day') // 'day' | 'trend' | 'foods' | 'settings'
-  const [modal, setModal] = useState(null) // { type, slot? } | { type:'editFood', food } | { type:'weight' }
+  const [view, setView] = useState('day') // 'day' | 'trend' | 'foods' | 'meals' | 'settings'
+  const [modal, setModal] = useState(null) // { type, slot? } | { type:'editFood', food } | { type:'weight' } | { type:'saveMeal', slot, items }
   const [loaded, setLoaded] = useState(false)
 
   // ── Load on mount ──────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
-      const [l, w, tg, f] = await Promise.all([
+      const [l, w, tg, f, sm] = await Promise.all([
         loadJSON(KEYS.NUT_LOGS, {}),
         loadJSON(KEYS.NUT_WEIGHTS, {}),
         loadJSON(KEYS.NUT_TARGETS, DEFAULT_TARGETS),
         loadJSON(KEYS.NUT_FOODS, []),
+        loadJSON(KEYS.NUT_MEALS, []),
       ])
-      setLogs(l); setWeights(w); setTargets(tg); setFoods(f); setLoaded(true)
+      setLogs(l); setWeights(w); setTargets(tg); setFoods(f); setSavedMeals(sm); setLoaded(true)
     })()
   }, [])
 
@@ -85,6 +87,7 @@ export default function Nutrition() {
   useEffect(() => { if (loaded) saveJSON(KEYS.NUT_WEIGHTS, weights) }, [weights, loaded])
   useEffect(() => { if (loaded) saveJSON(KEYS.NUT_TARGETS, targets) }, [targets, loaded])
   useEffect(() => { if (loaded) saveJSON(KEYS.NUT_FOODS, foods) }, [foods, loaded])
+  useEffect(() => { if (loaded) saveJSON(KEYS.NUT_MEALS, savedMeals) }, [savedMeals, loaded])
 
   const day = logs[date] || emptyDay()
   const totals = useMemo(() => dayTotals(day), [day])
@@ -131,6 +134,19 @@ export default function Nutrition() {
     setFoods(prev => prev.filter(f => f.id !== id))
   }
 
+  function saveMeal(name, mealType, items) {
+    const cal = Math.round(items.reduce((s, i) => s + (Number(i.cal) || 0), 0))
+    const protein = Math.round(items.reduce((s, i) => s + (Number(i.protein) || 0), 0) * 10) / 10
+    setSavedMeals(prev => [
+      ...prev,
+      { id: uid('meal'), name, mealType, items, cal, protein, savedAt: Date.now() },
+    ])
+  }
+
+  function delSavedMeal(id) {
+    setSavedMeals(prev => prev.filter(m => m.id !== id))
+  }
+
   if (!loaded) return null
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -148,6 +164,7 @@ export default function Nutrition() {
           { id: 'day', label: 'Day' },
           { id: 'trend', label: 'Trend' },
           { id: 'foods', label: 'Foods' },
+          { id: 'meals', label: 'Meals' },
         ].map(v => (
           <button key={v.id} onClick={() => setView(v.id)} style={{
             flex: 1, background: view === v.id ? T.nutrition : 'transparent',
@@ -169,6 +186,7 @@ export default function Nutrition() {
           onAddItem={(slot) => setModal({ type: 'addItem', slot })}
           onRemoveItem={removeItem}
           onSetWeight={() => setModal({ type: 'weight' })}
+          onSaveMeal={(slot, items) => setModal({ type: 'saveMeal', slot, items })}
         />
       )}
 
@@ -181,6 +199,10 @@ export default function Nutrition() {
           onAdd={() => setModal({ type: 'editFood', food: null })}
           onEdit={(food) => setModal({ type: 'editFood', food })}
           onDelete={delFood} />
+      )}
+
+      {view === 'meals' && (
+        <MealsView savedMeals={savedMeals} onDelete={delSavedMeal} />
       )}
 
       {view === 'settings' && (
@@ -211,13 +233,18 @@ export default function Nutrition() {
           onClose={() => setModal(null)}
           onSave={(kg) => { setWeight(date, kg); setModal(null) }} />
       )}
+      {modal?.type === 'saveMeal' && (
+        <SaveMealModal slot={modal.slot} items={modal.items}
+          onClose={() => setModal(null)}
+          onSave={(name, mealType) => { saveMeal(name, mealType, modal.items); setModal(null) }} />
+      )}
     </div>
   )
 }
 
 // ── Day view ─────────────────────────────────────────────────────────────────
 
-function DayView({ date, setDate, day, totals, target, calPct, proteinPct, weight, setDayType, onAddItem, onRemoveItem, onSetWeight }) {
+function DayView({ date, setDate, day, totals, target, calPct, proteinPct, weight, setDayType, onAddItem, onRemoveItem, onSetWeight, onSaveMeal }) {
   function shiftDate(days) {
     const d = new Date(date + 'T12:00:00')
     d.setDate(d.getDate() + days)
@@ -288,7 +315,8 @@ function DayView({ date, setDate, day, totals, target, calPct, proteinPct, weigh
           slot={slot}
           items={day[slot.id] || []}
           onAdd={() => onAddItem(slot.id)}
-          onRemove={(id) => onRemoveItem(slot.id, id)} />
+          onRemove={(id) => onRemoveItem(slot.id, id)}
+          onSave={() => onSaveMeal(slot.id, day[slot.id] || [])} />
       ))}
     </div>
   )
@@ -317,7 +345,7 @@ function RingCard({ label, value, target, unit, color, pct: p }) {
   )
 }
 
-function MealSlot({ slot, items, onAdd, onRemove }) {
+function MealSlot({ slot, items, onAdd, onRemove, onSave }) {
   const cal = items.reduce((s, i) => s + (Number(i.cal) || 0), 0)
   const protein = items.reduce((s, i) => s + (Number(i.protein) || 0), 0)
 
@@ -330,6 +358,15 @@ function MealSlot({ slot, items, onAdd, onRemove }) {
           <div className="mono" style={{ fontSize: 12, color: T.text3 }}>
             {fmtNum(cal)} kcal · {fmtNum(protein, 1)}g
           </div>
+        )}
+        {items.length > 0 && (
+          <button onClick={onSave} style={{
+            background: 'transparent', border: `1px solid ${T.border}`, borderRadius: 8,
+            color: T.text3, padding: '5px 10px', fontSize: 11, fontWeight: 700,
+            cursor: 'pointer', fontFamily: 'inherit',
+          }} title="Save as meal preset">
+            Save
+          </button>
         )}
         <button onClick={onAdd} style={{
           background: T.nutrition, border: 'none', borderRadius: 8, color: '#1a1208',
@@ -881,6 +918,224 @@ function EditFoodModal({ food, onSave, onClose }) {
           ...S.btnPrimary, marginTop: 18, background: T.nutrition, color: '#1a1208',
           opacity: name.trim() ? 1 : 0.5,
         }}>{food ? 'Save changes' : 'Add to library'}</button>
+    </Modal>
+  )
+}
+
+// ── Meals library view ──────────────────────────────────────────────────────
+
+const CAL_RANGES = [
+  { id: 'all',  label: 'Any cal',   min: 0,    max: Infinity },
+  { id: 'u400', label: '< 400',     min: 0,    max: 399 },
+  { id: 'u600', label: '400–600',   min: 400,  max: 599 },
+  { id: 'u800', label: '600–800',   min: 600,  max: 799 },
+  { id: 'u1k',  label: '800–1000',  min: 800,  max: 999 },
+  { id: 'o1k',  label: '1000+',     min: 1000, max: Infinity },
+]
+
+const SLOT_FILTERS = [
+  { id: 'all',       label: 'All' },
+  { id: 'breakfast', label: 'Breakfast' },
+  { id: 'lunch',     label: 'Lunch' },
+  { id: 'dinner',    label: 'Dinner' },
+  { id: 'snacks',    label: 'Snacks' },
+]
+
+function MealsView({ savedMeals, onDelete }) {
+  const [slotFilter, setSlotFilter] = useState('all')
+  const [calFilter, setCalFilter] = useState('all')
+  const [confirmDel, setConfirmDel] = useState(null)
+
+  const calRange = CAL_RANGES.find(r => r.id === calFilter) || CAL_RANGES[0]
+
+  const filtered = savedMeals
+    .filter(m => slotFilter === 'all' || m.mealType === slotFilter)
+    .filter(m => m.cal >= calRange.min && m.cal <= calRange.max)
+    .sort((a, b) => b.cal - a.cal || b.protein - a.protein)
+
+  // Group filtered meals by meal type for display
+  const grouped = SLOT_FILTERS.slice(1).reduce((acc, s) => {
+    const group = filtered.filter(m => m.mealType === s.id)
+    if (group.length) acc.push({ slotId: s.id, label: s.label, meals: group })
+    return acc
+  }, [])
+
+  const showGrouped = slotFilter === 'all'
+
+  return (
+    <div style={S.scroll}>
+      {/* Meal type filter */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 8, flexWrap: 'wrap' }}>
+        {SLOT_FILTERS.map(s => (
+          <button key={s.id} onClick={() => setSlotFilter(s.id)} style={{
+            background: slotFilter === s.id ? T.nutrition : 'transparent',
+            color: slotFilter === s.id ? '#1a1208' : T.text2,
+            border: `1px solid ${slotFilter === s.id ? T.nutrition : T.border}`,
+            borderRadius: 8, padding: '6px 10px', fontSize: 12, fontWeight: 700,
+            cursor: 'pointer', fontFamily: 'inherit',
+          }}>{s.label}</button>
+        ))}
+      </div>
+
+      {/* Calorie range filter */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 12, overflowX: 'auto', paddingBottom: 2 }}>
+        {CAL_RANGES.map(r => (
+          <button key={r.id} onClick={() => setCalFilter(r.id)} style={{
+            background: calFilter === r.id ? T.cal : 'transparent',
+            color: calFilter === r.id ? '#1a1208' : T.text3,
+            border: `1px solid ${calFilter === r.id ? T.cal : T.border}`,
+            borderRadius: 8, padding: '5px 10px', fontSize: 11, fontWeight: 700,
+            cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
+          }}>{r.label}</button>
+        ))}
+      </div>
+
+      {savedMeals.length === 0 && (
+        <EmptyState icon="fork"
+          title="No saved meals yet"
+          hint="Log items into a meal slot, then tap Save to add it here" />
+      )}
+
+      {savedMeals.length > 0 && filtered.length === 0 && (
+        <EmptyState icon="fork" title="No meals match" hint="Try a different meal type or calorie range" />
+      )}
+
+      {showGrouped ? grouped.map(({ slotId, label, meals }) => (
+        <div key={slotId}>
+          <div style={{
+            fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase',
+            letterSpacing: '.06em', marginBottom: 6, marginTop: 4,
+          }}>{label}</div>
+          {meals.map(m => (
+            <MealCard key={m.id} meal={m} onDelete={() => setConfirmDel(m)} />
+          ))}
+        </div>
+      )) : filtered.map(m => (
+        <MealCard key={m.id} meal={m} onDelete={() => setConfirmDel(m)} />
+      ))}
+
+      {confirmDel && (
+        <Confirm title="Delete saved meal?"
+          message={`"${confirmDel.name}" will be removed from your saved meals.`}
+          onCancel={() => setConfirmDel(null)}
+          onConfirm={() => { onDelete(confirmDel.id); setConfirmDel(null) }} />
+      )}
+    </div>
+  )
+}
+
+function MealCard({ meal, onDelete }) {
+  const [expanded, setExpanded] = useState(false)
+  const slotLabel = SLOT_FILTERS.find(s => s.id === meal.mealType)?.label || meal.mealType
+
+  return (
+    <div style={{ ...S.card, marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+        <button onClick={() => setExpanded(e => !e)} style={{
+          flex: 1, background: 'none', border: 'none', padding: 0,
+          cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <div style={{
+              fontSize: 10, fontWeight: 700, color: T.nutrition,
+              background: `${T.nutrition}22`, borderRadius: 4, padding: '2px 6px',
+              textTransform: 'uppercase', letterSpacing: '.04em',
+            }}>{slotLabel}</div>
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>{meal.name}</div>
+          <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
+            <span className="mono" style={{ fontSize: 12, color: T.cal, fontWeight: 600 }}>
+              {fmtNum(meal.cal)} kcal
+            </span>
+            <span className="mono" style={{ fontSize: 12, color: T.protein, fontWeight: 600 }}>
+              {fmtNum(meal.protein, 1)}g protein
+            </span>
+            <span style={{ fontSize: 12, color: T.text4 }}>
+              {meal.items.length} item{meal.items.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+        </button>
+        <button onClick={onDelete} style={{ ...S.iconBtn, color: T.bad, padding: 4, flexShrink: 0 }}>
+          <Icon name="trash" size={16} />
+        </button>
+      </div>
+
+      {expanded && (
+        <div style={{ marginTop: 10, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+          {meal.items.map((it, i) => (
+            <div key={i} style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              paddingTop: i > 0 ? 6 : 0, marginTop: i > 0 ? 6 : 0,
+              borderTop: i > 0 ? `1px solid ${T.border}` : 'none',
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.name}</div>
+                <div className="mono" style={{ fontSize: 11, color: T.text3, marginTop: 1 }}>{fmtNum(it.grams)}g</div>
+              </div>
+              <div className="mono" style={{ fontSize: 12, color: T.text2, textAlign: 'right' }}>
+                <div>{fmtNum(it.cal)} kcal</div>
+                <div style={{ color: T.text3, fontSize: 11 }}>{fmtNum(it.protein, 1)}g</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Save Meal Modal ───────────────────────────────────────────────────────────
+
+function SaveMealModal({ slot, items, onSave, onClose }) {
+  const defaultName = ''
+  const [name, setName] = useState(defaultName)
+  const [mealType, setMealType] = useState(slot)
+
+  const cal = Math.round(items.reduce((s, i) => s + (Number(i.cal) || 0), 0))
+  const protein = Math.round(items.reduce((s, i) => s + (Number(i.protein) || 0), 0) * 10) / 10
+
+  return (
+    <Modal title="Save meal" onClose={onClose} accent={T.nutrition}>
+      {/* Summary */}
+      <div style={{
+        background: T.bg3, borderRadius: 10, padding: '10px 14px',
+        display: 'flex', gap: 16, marginBottom: 14, marginTop: 6,
+      }}>
+        <div>
+          <div style={{ fontSize: 11, color: T.text3 }}>Calories</div>
+          <div className="mono" style={{ fontSize: 16, fontWeight: 700, color: T.cal }}>{fmtNum(cal)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: T.text3 }}>Protein</div>
+          <div className="mono" style={{ fontSize: 16, fontWeight: 700, color: T.protein }}>{fmtNum(protein, 1)}g</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: T.text3 }}>Items</div>
+          <div className="mono" style={{ fontSize: 16, fontWeight: 700, color: T.text }}>{items.length}</div>
+        </div>
+      </div>
+
+      <label style={S.label}>Meal name</label>
+      <input style={S.input} value={name} onChange={e => setName(e.target.value)}
+        placeholder="e.g. Apple + Milk morning" autoFocus />
+
+      <label style={{ ...S.label, marginTop: 12 }}>Meal type</label>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+        {SLOT_FILTERS.slice(1).map(s => (
+          <button key={s.id} onClick={() => setMealType(s.id)} style={{
+            flex: 1, background: mealType === s.id ? T.nutrition : 'transparent',
+            color: mealType === s.id ? '#1a1208' : T.text2,
+            border: `1px solid ${mealType === s.id ? T.nutrition : T.border}`,
+            borderRadius: 8, padding: '7px 2px', fontSize: 11, fontWeight: 700,
+            cursor: 'pointer', fontFamily: 'inherit',
+          }}>{s.label}</button>
+        ))}
+      </div>
+
+      <button onClick={() => onSave(name.trim() || 'Unnamed meal', mealType)}
+        style={{ ...S.btnPrimary, marginTop: 16, background: T.nutrition, color: '#1a1208' }}>
+        Save meal
+      </button>
     </Modal>
   )
 }

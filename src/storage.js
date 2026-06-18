@@ -164,6 +164,7 @@ export const KEYS = {
   NUT_WEIGHTS: 'personal.nutrition.weights',
   NUT_TARGETS: 'personal.nutrition.targets',
   NUT_FOODS: 'personal.nutrition.foods', // food library
+  NUT_MEALS: 'personal.nutrition.meals', // saved meal presets
   // Gym
   GYM_SESSIONS: 'personal.gym.sessions',
   GYM_EXERCISES: 'personal.gym.exercises', // exercise library
