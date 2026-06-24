@@ -2,13 +2,13 @@
  * backup.js — Export/import the entire app state as a JSON file.
  *
  * Web:     uses a Blob URL + invisible <a download> click → browser save dialog
- * Android: same code, but Capacitor's WebView routes the download through
- *          Android's download manager → file lands in /Download/
+ * Android: uses @capacitor/filesystem to write, @capacitor/share to share
  *
  * The export captures every namespaced key under `personal.*`,
  * tagged with a version number for future migrations.
  */
 
+import { Capacitor } from '@capacitor/core'
 import { Storage, KEYS } from './storage.js'
 
 const BACKUP_VERSION = 1
@@ -19,10 +19,65 @@ const APP_TAG = 'personal-superapp'
 // export stale or unrelated localStorage entries.
 const ALL_KEYS = Object.values(KEYS)
 
+const isNative = () => Capacitor.isNativePlatform()
+
+// ── Native helpers ──────────────────────────────────────────────────────────
+
+const NATIVE_DIR = 'superapp_exports'
+
+/**
+ * Write a JSON string to Documents/superapp_exports/<filename> on Android.
+ * Creates the directory if it doesn't exist.
+ * Returns { uri } with the file URI for share.
+ */
+export async function writeNative(filename, json) {
+  const { Filesystem, Directory } = await import('@capacitor/filesystem')
+
+  // Ensure the subdirectory exists. mkdir with recursive:true is a no-op if
+  // it already exists, so safe to call every time.
+  try {
+    await Filesystem.mkdir({
+      path: NATIVE_DIR,
+      directory: Directory.Documents,
+      recursive: true,
+    })
+  } catch (e) {
+    // Older plugin versions throw if dir exists even with recursive:true.
+    // Ignore those and proceed — the writeFile call below will catch real errors.
+    const msg = String(e?.message || e)
+    if (!msg.includes('exists')) throw e
+  }
+
+  const result = await Filesystem.writeFile({
+    path: `${NATIVE_DIR}/${filename}`,
+    data: json,
+    directory: Directory.Documents,
+    encoding: 'utf8',
+  })
+
+  return { uri: result.uri }
+}
+
+/**
+ * Write to Documents/superapp_exports/ then open the native share sheet.
+ * Used for manual "Export backup now" on Android.
+ */
+export async function exportNative(filename, json) {
+  const { uri } = await writeNative(filename, json)
+  const { Share } = await import('@capacitor/share')
+  await Share.share({
+    title: filename,
+    text: 'Personal app backup',
+    url: uri,
+    dialogTitle: 'Save or share backup',
+  })
+  return { filename, size: json.length, location: 'native-share', uri }
+}
+
 // ── Export ──────────────────────────────────────────────────────────────────
 
 /**
- * Build the backup blob. Each key is loaded, attempted-parsed as JSON
+ * Build the backup object. Each key is loaded, attempted-parsed as JSON
  * (so the export is structured, not double-stringified), and bundled with
  * metadata.
  */
@@ -43,29 +98,39 @@ export async function buildBackup() {
 }
 
 /**
- * Trigger a download of the backup as a JSON file.
- * Filename includes the date so multiple exports don't collide.
- * Optional `tag` is appended to the filename to distinguish automatic
- * backups (e.g. 'pre-restore') from user-initiated ones.
+ * Build filename with date and optional tag.
+ */
+export function buildFilename(tag = null) {
+  const date = new Date().toISOString().split('T')[0]
+  const suffix = tag ? `-${tag}` : ''
+  return `personal-backup-${date}${suffix}.json`
+}
+
+/**
+ * Trigger a download/share of the backup as a JSON file.
+ * On Android: writes to Documents/superapp_exports/ and opens share sheet.
+ * On web:     blob URL + invisible <a download> click → browser save dialog.
+ *
+ * Optional `tag` is appended to the filename (e.g. 'pre-restore').
  */
 export async function exportBackup(tag = null) {
   const backup = await buildBackup()
   const json = JSON.stringify(backup, null, 2)
+  const filename = buildFilename(tag)
+
+  if (isNative()) {
+    return await exportNative(filename, json)
+  }
+
+  // Web path — blob anchor click
   const blob = new Blob([json], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
-
-  const date = new Date().toISOString().split('T')[0]
-  const suffix = tag ? `-${tag}` : ''
-  const filename = `personal-backup-${date}${suffix}.json`
-
   const a = document.createElement('a')
   a.href = url
   a.download = filename
   document.body.appendChild(a)
   a.click()
   document.body.removeChild(a)
-
-  // Free the blob URL after the click finishes
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 
   return { filename, size: blob.size, keys: Object.keys(backup.data).length, location: 'download' }
@@ -76,6 +141,7 @@ export async function exportBackup(tag = null) {
 /**
  * Open the system file picker, return the parsed backup object on success.
  * Returns null if the user cancels.
+ * Works on both web and Android (Capacitor WebView supports <input type=file>).
  */
 export function pickBackupFile() {
   return new Promise((resolve, reject) => {

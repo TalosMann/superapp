@@ -1,8 +1,7 @@
 /**
  * App.jsx — Personal super-app shell.
  *
- * Stage 4: Home, Timetable, Nutrition, Goals, and Gym fully built.
- * Finance remains a stub until Stage 5.
+ * Stage 5: Home, Timetable, Finance, Nutrition, Goals, and Gym all built.
  */
 
 import { useState } from 'react'
@@ -13,6 +12,7 @@ import Nutrition from './sections/Nutrition.jsx'
 import Timetable from './sections/timetable/Timetable.jsx'
 import Goals from './sections/goals/Goals.jsx'
 import Gym from './sections/gym/Gym.jsx'
+import Finance from './sections/finance/Finance.jsx'
 
 const TABS = [
   { id: 'home',      label: 'Home',      icon: 'dashboard', color: T.accent    },
@@ -23,7 +23,7 @@ const TABS = [
   { id: 'goals',     label: 'Goals',     icon: 'target',    color: T.goals     },
 ]
 
-const BUILT_TABS = ['home', 'timetable', 'nutrition', 'goals', 'gym']
+const BUILT_TABS = ['home', 'timetable', 'finance', 'nutrition', 'goals', 'gym']
 
 export default function App() {
   const [tab, setTab] = useState('home')
@@ -33,6 +33,7 @@ export default function App() {
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         {tab === 'home'      && <Home />}
         {tab === 'timetable' && <Timetable />}
+        {tab === 'finance'   && <Finance />}
         {tab === 'nutrition' && <Nutrition />}
         {tab === 'gym'       && <Gym />}
         {tab === 'goals'     && <Goals />}

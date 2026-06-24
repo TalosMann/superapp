@@ -4,32 +4,43 @@
  * Triggered once per app launch. Checks the configured frequency against
  * the last successful auto-backup timestamp; if due, runs an export.
  *
- * Backup destination:
- *   1. If user has chosen a directory and we still have permission → write there
- *   2. Otherwise → trigger a browser download (lands in Downloads folder)
+ * Backup destination (three paths, checked in order):
+ *
+ *   Android (native):
+ *     → Silent write to Documents/superapp_exports/
+ *       No share sheet — auto-backup runs unattended on app open.
+ *
+ *   Web, user has chosen a directory + permission still valid:
+ *     → Write directly into that directory via File System Access API
+ *
+ *   Web, no directory / permission lapsed:
+ *     → Blob URL + <a download> click → Downloads folder
+ *
+ * Manual "Export backup now" in Settings goes through writeBackupToDestination()
+ * with { share: true }, which opens the Android share sheet instead of writing
+ * silently. Web paths are unaffected.
+ *
+ * Directory handle (web only) is stored in IndexedDB — the only place FS
+ * Access API handles survive page reloads. Not used on Android at all.
  *
  * Versioned filenames: personal-backup-2026-05-13.json
- * Auto-backups get the same filename as manual ones — they're indistinguishable
- * by content. The user can tell them apart by the "Last auto-backup" timestamp
- * shown in settings.
- *
- * Directory handle is stored via IndexedDB (the only place File System Access
- * API handles persist across reloads). We can't store it in localStorage
- * because handles aren't serializable.
  */
 
-import { buildBackup, exportBackup } from './backup.js'
+import { Capacitor } from '@capacitor/core'
+import { buildBackup, buildFilename, writeNative, exportNative } from './backup.js'
 import { Storage } from './storage.js'
 
 const KEY_FREQUENCY = 'personal.backup.frequency'   // 'off'|'daily'|'weekly'|'monthly'
 const KEY_LAST_AUTO = 'personal.backup.lastAuto'    // ISO timestamp
-const KEY_DIR_LABEL = 'personal.backup.dirLabel'    // human-readable path for display
+const KEY_DIR_LABEL = 'personal.backup.dirLabel'    // human-readable path for display (web only)
 
 const IDB_NAME = 'personal-fs'
 const IDB_STORE = 'handles'
 const IDB_KEY_DIR = 'backupDir'
 
-// ── IndexedDB helpers for storing the directory handle ──────────────────────
+const isNative = () => Capacitor.isNativePlatform()
+
+// ── IndexedDB helpers for storing the directory handle (web only) ───────────
 
 function openIDB() {
   return new Promise((resolve, reject) => {
@@ -74,15 +85,16 @@ async function idbDelete(key) {
 
 /**
  * Whether File System Access API is available in this browser.
- * Chrome and Edge yes, Firefox and Safari no.
+ * Chrome and Edge yes, Firefox and Safari no, Android WebView no.
+ * On Android we always use the native path instead.
  */
 export function fsApiSupported() {
-  return typeof window !== 'undefined' && 'showDirectoryPicker' in window
+  return !isNative() && typeof window !== 'undefined' && 'showDirectoryPicker' in window
 }
 
 /**
- * Open the native folder picker. On success, persists the handle and
- * returns { label }. On user cancel, returns null.
+ * Open the native folder picker (web only). On success, persists the handle
+ * and returns { label }. On user cancel, returns null.
  */
 export async function pickBackupDirectory() {
   if (!fsApiSupported()) throw new Error('Folder picker not supported in this browser')
@@ -103,7 +115,7 @@ export async function pickBackupDirectory() {
 }
 
 /**
- * Forget the saved backup directory; future exports go to Downloads.
+ * Forget the saved backup directory; future web exports go to Downloads.
  */
 export async function clearBackupDirectory() {
   await idbDelete(IDB_KEY_DIR)
@@ -112,13 +124,15 @@ export async function clearBackupDirectory() {
 
 /**
  * Get the currently-configured directory label, or null if Downloads is used.
+ * Always null on Android (native path doesn't use this).
  */
 export async function getBackupDirectoryLabel() {
+  if (isNative()) return null
   return await Storage.get(KEY_DIR_LABEL)
 }
 
 /**
- * Try to retrieve the saved directory handle.
+ * Try to retrieve the saved directory handle (web only).
  * Returns null if no handle saved OR if we lost permission (e.g. after a
  * browser restart). Caller should fall back to browser download.
  */
@@ -133,7 +147,6 @@ export async function getWritableBackupDir() {
     const perm = await handle.queryPermission({ mode: 'readwrite' })
     if (perm === 'granted') return handle
     if (perm === 'prompt') {
-      // Try to re-request silently. If the user has interacted recently this works.
       const req = await handle.requestPermission({ mode: 'readwrite' })
       if (req === 'granted') return handle
     }
@@ -142,19 +155,40 @@ export async function getWritableBackupDir() {
 }
 
 /**
- * Write a backup file to either the chosen directory (if available) or
- * trigger a normal browser download.
+ * Write a backup to the appropriate destination.
  *
- * Returns { filename, size, location: 'directory'|'download' }
+ * On Android (native):
+ *   - share: false (default) → silent write to Documents/superapp_exports/
+ *   - share: true            → write then open the native share sheet
+ *
+ * On web:
+ *   - chosen directory (FS Access) → write there
+ *   - fallback                     → blob download
+ *
+ * `tag` is appended to the filename (e.g. 'pre-restore').
+ *
+ * Returns { filename, size, location }
+ *   location: 'native-silent' | 'native-share' | 'directory' | 'download'
  */
-export async function writeBackupToDestination(tag = null) {
+export async function writeBackupToDestination(tag = null, { share = false } = {}) {
   const backup = await buildBackup()
   const json = JSON.stringify(backup, null, 2)
-  const date = new Date().toISOString().split('T')[0]
-  const suffix = tag ? `-${tag}` : ''
-  const filename = `personal-backup-${date}${suffix}.json`
+  const filename = buildFilename(tag)
 
-  // Try directory write first
+  // ── Android native path ──────────────────────────────────────────────────
+  if (isNative()) {
+    if (share) {
+      // Manual export: write + share sheet
+      const result = await exportNative(filename, json)
+      return { filename, size: json.length, location: 'native-share' }
+    } else {
+      // Auto-backup / pre-restore: silent write only
+      await writeNative(filename, json)
+      return { filename, size: json.length, location: 'native-silent' }
+    }
+  }
+
+  // ── Web: try chosen directory first ─────────────────────────────────────
   const dir = await getWritableBackupDir()
   if (dir) {
     try {
@@ -164,13 +198,22 @@ export async function writeBackupToDestination(tag = null) {
       await writable.close()
       return { filename, size: json.length, location: 'directory' }
     } catch (err) {
-      console.warn('[autoBackup] Directory write failed, falling back to download:', err)
-      // Fall through to download
+      console.warn('[autoBackup] directory write failed, falling back to download:', err)
     }
   }
 
-  // Fallback: browser download
-  return await exportBackup(tag)
+  // ── Web: blob download fallback ──────────────────────────────────────────
+  const blob = new Blob([json], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+
+  return { filename, size: blob.size, location: 'download' }
 }
 
 // ── Frequency settings ──────────────────────────────────────────────────────
@@ -222,7 +265,7 @@ export async function checkAndRun() {
     if (elapsed < days) return { ran: false, reason: 'not-due', daysUntil: days - elapsed }
   }
 
-  // Due — run it
+  // Due — run it (no share sheet for auto-backup)
   try {
     const result = await writeBackupToDestination()
     await setLastAutoBackup()

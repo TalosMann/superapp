@@ -9,6 +9,7 @@
  */
 
 import { useState, useEffect } from 'react'
+import { Capacitor } from '@capacitor/core'
 import { T, S } from '../theme.js'
 import { Confirm, ProgressBar } from '../shared.jsx'
 import Icon from '../Icon.jsx'
@@ -345,6 +346,7 @@ function SettingsView() {
   const [lastAuto, setLastAuto] = useState(null)
   const [dirLabel, setDirLabel] = useState(null)
   const fsSupported = fsApiSupported()
+  const onNative = Capacitor.isNativePlatform()
 
   useEffect(() => { refreshStats(); refreshBackupSettings() }, [])
 
@@ -389,10 +391,12 @@ function SettingsView() {
   async function handleExport() {
     setBusy(true)
     try {
-      const result = await writeBackupToDestination()
-      const where = result.location === 'directory'
-        ? 'chosen folder'
-        : 'Downloads'
+      const result = await writeBackupToDestination(null, { share: true })
+      const where = result.location === 'native-share'
+        ? 'superapp_exports'
+        : result.location === 'directory'
+          ? 'chosen folder'
+          : 'Downloads'
       flash('success', `Saved ${result.filename} to ${where} (${formatBytes(result.size)})`)
     } catch (err) {
       flash('error', `Export failed: ${err.message}`)
@@ -462,7 +466,8 @@ function SettingsView() {
 
       <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>Backup</div>
 
-      {/* Destination card */}
+      {/* Destination card — web only (Android writes to Documents/superapp_exports/) */}
+      {!onNative && (
       <div style={{ ...S.card }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
           <div style={{ color: T.accent, marginTop: 2 }}><Icon name="dashboard" size={18} /></div>
@@ -499,6 +504,7 @@ function SettingsView() {
           </div>
         )}
       </div>
+      )}
 
       <div style={{ ...S.card }}>
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 12 }}>
@@ -570,7 +576,7 @@ function SettingsView() {
 
       <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>About</div>
       <div style={{ ...S.card, fontSize: 12, color: T.text2, lineHeight: 1.6 }}>
-        <div>Personal v0.4.1 — Auto-backup</div>
+        <div>Personal v0.4.2 — Android export fix</div>
         <div style={{ marginTop: 4 }}>All data stored locally on this device.</div>
       </div>
 
