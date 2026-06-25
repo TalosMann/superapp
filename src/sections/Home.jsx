@@ -20,6 +20,8 @@ import {
   writeBackupToDestination, fsApiSupported, FREQUENCIES,
 } from '../autoBackup.js'
 import { loadJSON, KEYS } from '../storage.js'
+import { isStorageEncrypted } from '../migration.js'
+import { verifyPin, setupPin } from '../pinAuth.js'
 import { fmtTime, timeToMin, getTodayDayName, fmtDateLong } from '../utils.js'
 import { CATEGORY_BY_ID } from './timetable/data.js'
 import { TIERS } from './goals/data.js'
@@ -347,8 +349,10 @@ function SettingsView() {
   const [dirLabel, setDirLabel] = useState(null)
   const fsSupported = fsApiSupported()
   const onNative = Capacitor.isNativePlatform()
+  const [encrypted, setEncrypted] = useState(false)
+  const [showChangePin, setShowChangePin] = useState(false)
 
-  useEffect(() => { refreshStats(); refreshBackupSettings() }, [])
+  useEffect(() => { refreshStats(); refreshBackupSettings(); isStorageEncrypted().then(setEncrypted) }, [])
 
   async function refreshStats() {
     setStats(await getStorageStats())
@@ -464,6 +468,29 @@ function SettingsView() {
         )}
       </div>
 
+      {onNative && (<>
+        <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>Security</div>
+        <div style={{ ...S.card }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 14 }}>
+            <div style={{ color: T.accent, marginTop: 2 }}><Icon name="check" size={18} /></div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.text }}>App lock</div>
+              <div style={{ fontSize: 12, color: T.text3, marginTop: 2, lineHeight: 1.4 }}>
+                PIN required on launch and after 30s in the background.
+                {encrypted
+                  ? ' Storage is encrypted at rest.'
+                  : ' Storage encryption status unknown — restart the app once if this persists.'}
+              </div>
+            </div>
+          </div>
+          <button onClick={() => setShowChangePin(true)} style={{
+            width: '100%', background: 'transparent', border: `1px solid ${T.border}`,
+            borderRadius: 10, padding: 11, color: T.text, fontSize: 13, fontWeight: 600,
+            cursor: 'pointer', fontFamily: 'inherit',
+          }}>Change PIN</button>
+        </div>
+      </>)}
+
       <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>Backup</div>
 
       {/* Destination card — web only (Android writes to Documents/superapp_exports/) */}
@@ -576,7 +603,7 @@ function SettingsView() {
 
       <div style={{ fontSize: 11, fontWeight: 700, color: T.text3, textTransform: 'uppercase', letterSpacing: '.05em', margin: '20px 4px 8px' }}>About</div>
       <div style={{ ...S.card, fontSize: 12, color: T.text2, lineHeight: 1.6 }}>
-        <div>Personal v0.4.2 — Android export fix</div>
+        <div>Personal v0.5.0 — App lock + encrypted storage</div>
         <div style={{ marginTop: 4 }}>All data stored locally on this device.</div>
       </div>
 
@@ -606,6 +633,104 @@ function SettingsView() {
           confirmLabel="Restore"
         />
       )}
+
+      {showChangePin && <ChangePinModal onClose={() => setShowChangePin(false)} />}
+    </div>
+  )
+}
+
+function ChangePinModal({ onClose }) {
+  const [step, setStep] = useState('verify') // 'verify' | 'create' | 'confirm'
+  const [current, setCurrent] = useState('')
+  const [first, setFirst] = useState('')
+  const [second, setSecond] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [done, setDone] = useState(false)
+
+  function digitsOnly(v) { return v.replace(/\D/g, '').slice(0, 6) }
+
+  async function handleVerify() {
+    setBusy(true); setErr('')
+    const ok = await verifyPin(current)
+    setBusy(false)
+    if (ok) setStep('create')
+    else { setErr('Incorrect PIN'); setCurrent('') }
+  }
+
+  function handleCreateNext() {
+    if (first.length !== 6) { setErr('Enter all 6 digits'); return }
+    setErr(''); setStep('confirm')
+  }
+
+  async function handleConfirm() {
+    if (second !== first) {
+      setErr("PINs don't match — try again")
+      setFirst(''); setSecond(''); setStep('create')
+      return
+    }
+    setBusy(true)
+    await setupPin(second)
+    setBusy(false)
+    setDone(true)
+    setTimeout(onClose, 1200)
+  }
+
+  const inputStyle = {
+    background: T.bg3, border: `1px solid ${T.border}`, borderRadius: 10,
+    padding: '12px 14px', color: T.text, fontSize: 20, letterSpacing: '0.3em',
+    textAlign: 'center', width: '100%', fontFamily: 'inherit', outline: 'none',
+  }
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,.6)', zIndex: 200,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24,
+    }} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ ...S.card, width: '100%', maxWidth: 340, padding: 24 }}>
+        {done ? (
+          <div style={{ textAlign: 'center', padding: '20px 0' }}>
+            <div style={{ fontSize: 32, marginBottom: 10 }}>✓</div>
+            <div style={{ color: T.good, fontWeight: 700 }}>PIN changed</div>
+          </div>
+        ) : (<>
+          <div style={{ fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 6 }}>
+            {step === 'verify' ? 'Enter current PIN' : step === 'create' ? 'Choose a new PIN' : 'Confirm new PIN'}
+          </div>
+          <div style={{ fontSize: 12, color: T.text3, marginBottom: 16 }}>
+            {step === 'verify' ? 'Verify it\'s you before changing your PIN' : '6 digits'}
+          </div>
+          {err && <div style={{ fontSize: 12, color: T.bad, marginBottom: 12 }}>{err}</div>}
+
+          {step === 'verify' && (
+            <input autoFocus type="password" inputMode="numeric" style={inputStyle} value={current}
+              onChange={e => setCurrent(digitsOnly(e.target.value))} placeholder="······" />
+          )}
+          {step === 'create' && (
+            <input autoFocus type="password" inputMode="numeric" style={inputStyle} value={first}
+              onChange={e => setFirst(digitsOnly(e.target.value))} placeholder="······" />
+          )}
+          {step === 'confirm' && (
+            <input autoFocus type="password" inputMode="numeric" style={inputStyle} value={second}
+              onChange={e => setSecond(digitsOnly(e.target.value))} placeholder="······" />
+          )}
+
+          <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+            <button onClick={onClose} style={{
+              flex: 1, background: 'transparent', border: `1px solid ${T.border}`, borderRadius: 10,
+              padding: 11, color: T.text2, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+            }}>Cancel</button>
+            <button
+              disabled={busy || (step === 'verify' && current.length !== 6) || (step === 'create' && first.length !== 6) || (step === 'confirm' && second.length !== 6)}
+              onClick={step === 'verify' ? handleVerify : step === 'create' ? handleCreateNext : handleConfirm}
+              style={{
+                flex: 1, background: T.accent, border: 'none', borderRadius: 10,
+                padding: 11, color: '#0a0e15', fontSize: 13, fontWeight: 700,
+                cursor: 'pointer', fontFamily: 'inherit', opacity: busy ? 0.6 : 1,
+              }}>{step === 'confirm' ? 'Save' : 'Next'}</button>
+          </div>
+        </>)}
+      </div>
     </div>
   )
 }

@@ -2,9 +2,15 @@
  * App.jsx — Personal super-app shell.
  *
  * Stage 5: Home, Timetable, Finance, Nutrition, Goals, and Gym all built.
+ * Stage 6: app-wide PIN lock + SQLCipher encryption-at-rest (see
+ * LockScreen.jsx, migration.js, pinAuth.js for the actual mechanics and
+ * their honest limits — no biometric yet, PIN is an access gate not
+ * independent crypto, deliberately deferred per the Stage 6 changelog).
  */
 
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { Capacitor } from '@capacitor/core'
+import { App as CapApp } from '@capacitor/app'
 import { T, S } from './theme.js'
 import Icon from './Icon.jsx'
 import Home from './sections/Home.jsx'
@@ -13,6 +19,7 @@ import Timetable from './sections/timetable/Timetable.jsx'
 import Goals from './sections/goals/Goals.jsx'
 import Gym from './sections/gym/Gym.jsx'
 import Finance from './sections/finance/Finance.jsx'
+import LockScreen from './LockScreen.jsx'
 
 const TABS = [
   { id: 'home',      label: 'Home',      icon: 'dashboard', color: T.accent    },
@@ -24,9 +31,33 @@ const TABS = [
 ]
 
 const BUILT_TABS = ['home', 'timetable', 'finance', 'nutrition', 'goals', 'gym']
+const LOCK_TIMEOUT_MS = 30_000 // re-lock after 30s in the background
 
 export default function App() {
   const [tab, setTab] = useState('home')
+  const onNative = Capacitor.isNativePlatform()
+  // Web/dev: never locked at all (matches existing storage.js bypass pattern).
+  const [unlocked, setUnlocked] = useState(!onNative)
+  const bgTimestamp = useRef(null)
+
+  useEffect(() => {
+    if (!onNative) return
+    const sub = CapApp.addListener('appStateChange', ({ isActive }) => {
+      if (!isActive) {
+        bgTimestamp.current = Date.now()
+      } else {
+        if (bgTimestamp.current && Date.now() - bgTimestamp.current > LOCK_TIMEOUT_MS) {
+          setUnlocked(false)
+        }
+        bgTimestamp.current = null
+      }
+    })
+    return () => { sub.then(h => h.remove()).catch(() => {}) }
+  }, [onNative])
+
+  if (onNative && !unlocked) {
+    return <LockScreen onUnlock={() => setUnlocked(true)} />
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: T.bg }}>

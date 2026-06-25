@@ -2,7 +2,13 @@
  * storage.js — Unified storage for Personal super-app.
  *
  * Web (npm run dev)    →  localStorage
- * Android (Capacitor)  →  @capacitor-community/sqlite, AES-256 encrypted
+ * Android (Capacitor)  →  @capacitor-community/sqlite, SQLCipher-encrypted
+ *
+ * Encryption is handled once, up front, by migration.js — App.jsx calls
+ * ensureEncryptedStorage() before mounting anything that touches Storage.
+ * By the time any code in this file runs on native, the encryption secret
+ * is already set and the 'personal_secure' database already exists. This
+ * file just opens it.
  *
  * Each module owns its own namespace key:
  *   personal.timetable   — events, temp events, accomplishments
@@ -12,23 +18,15 @@
  *   personal.goals       — daily, weekly, monthly goals
  *   personal.badges      — accomplishment badges (earned + unearned)
  *   personal.settings    — global app settings (currency, theme, etc.)
- *   personal.pin         — SHA-256 PIN hash
+ *
+ * (The PIN hash lives in @capacitor/preferences, not here — see pinAuth.js.
+ * It needs to be readable before any SQLite connection exists at all.)
  */
 
 import { Capacitor } from '@capacitor/core'
-import { Device } from '@capacitor/device'
 
 const isNative = () => Capacitor.isNativePlatform()
-
-async function getPassphrase() {
-  try {
-    const info = await Device.getId()
-    const uuid = info.identifier || 'fallback-device-id'
-    return `Personal_2026_${uuid}_kP9#mX2$`
-  } catch {
-    return 'Personal_2026_fallback_kP9#mX2$'
-  }
-}
+const DB_NAME = 'personal_secure'
 
 // Module-level singleton — never instantiate SQLiteConnection more than once,
 // otherwise the JS-side registry diverges from the native-side registry and
@@ -51,26 +49,27 @@ async function initDB() {
   console.log('[Storage] initializing SQLite connection...')
   const { CapacitorSQLite, SQLiteConnection } = await import('@capacitor-community/sqlite')
   if (!_sqlite) _sqlite = new SQLiteConnection(CapacitorSQLite)
-  const dbName = 'personal'
 
   // Try retrieve first (handles warm starts where connection persists from
   // a previous app session). Fall through to create on cold starts. If
   // create itself reports "already exists" (stale ghost connection), close
   // it explicitly then create fresh.
   try {
-    _db = await _sqlite.retrieveConnection(dbName, false)
+    _db = await _sqlite.retrieveConnection(DB_NAME, false)
     console.log('[Storage] retrieved existing connection')
   } catch {
     try {
-      _db = await _sqlite.createConnection(dbName, false, 'no-encryption', 1, false)
-      console.log('[Storage] created new connection')
+      _db = await _sqlite.createConnection(DB_NAME, true, 'secret', 1, false)
+      console.log('[Storage] created new encrypted connection')
     } catch (createErr) {
       const msg = String(createErr?.message || createErr)
       if (msg.includes('already exists')) {
         console.log('[Storage] connection in inconsistent state, closing then recreating')
-        try { await _sqlite.closeConnection(dbName, false) } catch {}
-        _db = await _sqlite.createConnection(dbName, false, 'no-encryption', 1, false)
+        try { await _sqlite.closeConnection(DB_NAME, false) } catch {}
+        _db = await _sqlite.createConnection(DB_NAME, true, 'secret', 1, false)
       } else {
+        console.error('[Storage] failed to open encrypted database. Was ensureEncryptedStorage() ' +
+          'called before this? The encryption secret must be set first.', createErr)
         throw createErr
       }
     }
@@ -176,5 +175,7 @@ export const KEYS = {
   BADGES: 'personal.badges',
   // Global
   SETTINGS: 'personal.settings',
-  PIN_HASH: 'personal.pin',
+  // Note: PIN_HASH removed from here — it now lives in @capacitor/preferences
+  // (see pinAuth.js), not in this SQLite store. It needs to be readable
+  // before any database connection exists.
 }
